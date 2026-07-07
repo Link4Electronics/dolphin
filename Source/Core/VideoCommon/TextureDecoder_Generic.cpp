@@ -122,7 +122,15 @@ static inline void DecodeBytes_RGB5A3(u32* dst, const u16* src)
 static inline void DecodeBytes_RGBA8(u32* dst, const u16* src, const u16* src2)
 {
   for (int x = 0; x < 4; x++)
-    dst[x] = ((src[x] & 0xFF) << 24) | ((src[x] & 0xFF00) >> 8) | (src2[x] << 8);
+  {
+    const u16 ar = Common::FromBigEndian(src[x]);
+    const u16 gb = Common::FromBigEndian(src2[x]);
+    const u8 a = ar >> 8;
+    const u8 r = ar & 0xFF;
+    const u8 g = gb >> 8;
+    const u8 b = gb & 0xFF;
+    dst[x] = r | (g << 8) | (b << 16) | (a << 24);
+  }
 }
 
 static void DecodeDXTBlock(u32* dst, const DXTBlock* src, int pitch)

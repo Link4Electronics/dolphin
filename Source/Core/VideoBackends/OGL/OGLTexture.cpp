@@ -120,6 +120,10 @@ bool UsePersistentStagingBuffers()
   // We require ARB_buffer_storage to create the persistent mapped buffer,
   // ARB_shader_image_load_store for glMemoryBarrier, and ARB_sync to ensure
   // the GPU has finished the copy before reading the buffer from the CPU.
+  // On big-endian hosts, persistent mappings bypass the GL driver's byte-swap,
+  // so data written by the CPU in BE byte order is read as-is by the GPU (LE).
+  if constexpr (std::endian::native == std::endian::big)
+    return false;
   return g_ogl_config.bSupportsGLBufferStorage && g_ogl_config.bSupportsImageLoadStore &&
          g_ogl_config.bSupportsGLSync;
 }
@@ -358,11 +362,12 @@ void OGLTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8
     std::vector<u8> swapped_buffer;
     if constexpr (std::endian::native == std::endian::big)
     {
-      if (m_config.format == AbstractTextureFormat::RGBA8)
+      if (m_config.format == AbstractTextureFormat::RGBA8 ||
+          m_config.format == AbstractTextureFormat::BGRA8)
       {
         swapped_buffer.assign(buffer, buffer + buffer_size);
         u32* pixels = reinterpret_cast<u32*>(swapped_buffer.data());
-        for (size_t i = 0; i < buffer_size / sizeof(u32); i++)
+        for (u32 i = 0; i < buffer_size / sizeof(u32); i++)
           pixels[i] = Common::swap32(pixels[i]);
         upload_buffer = swapped_buffer.data();
       }

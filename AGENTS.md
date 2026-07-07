@@ -181,7 +181,9 @@ Wiimote unions are not needed for GC-only use (Swiss on a GameCube).
 | `TextureDecoder_Common.cpp:309-314` | `TexDecoder_Decode`: **removed** conditional byteswap pass on BE (was converting decoded u32 pixels from host `[A,B,G,R]` to `[R,G,B,A]`, but this broke SW renderer which reads u32 via bitshift ops). Byteswap moved to `OGLTexture::Load` at GL upload boundary. |
 | `TextureDecoder_Common.cpp:347-353,402,456,491,508,524,540,626` | `TexDecoder_DecodeTexel`: replaced all 7 `*((u32*)dst)` writes with `SetTexelBytes()` helper that stores bytes in fixed `[R,G,B,A]` order via individual byte assignments. On BE, `*(u32*)dst` stored reversed byte order `[A,B,G,R]`, causing `SetTexel`/`AddTexel` to read wrong channels → green tint/blur in SW-rendered textures. Added `static inline SetTexelBytes(u8* dst, u32 val)` helper. All paletted (C4/C8/C14X2), IA8, RGB565, RGB5A3, and CMPR paths fixed. |
 | `TextureDecoder_Common.cpp:738-748` | `TexDecoder_DecodeXFB`: **removed** conditional byteswap (was redundant once OGLTexture::Load handles it). |
-| `OGLTexture.cpp:357-369` | `OGLTexture::Load`: added conditional byteswap on BE for uncompressed RGBA8 textures — converts native u32 byte order to GL_RGBA byte order before `glTexSubImage2D`/`glTexImage2D`. |
+| `TextureDecoder_Common.cpp:309-314` | `TexDecoder_Decode`: added conditional byteswap on BE for decoded u32 pixel data — converts native u32 `[A,B,G,R]` byte order to `[R,G,B,A]` GL_RGBA order after `_TexDecoder_DecodeImpl` and overlay pass. |
+| `TextureDecoder_Common.cpp:758-763` | `TexDecoder_DecodeXFB`: added conditional byteswap on BE for decoded XFB pixel data — same conversion to GL_RGBA byte order. |
+| `OGLTexture.cpp:357-369` | **Removed** byteswap from `OGLTexture::Load` — data is now already in `[R,G,B,A]` byte order from the decoder. Avoids double-swapping custom/OSD textures from image files. |
 | `SWOGLWindow.cpp:93-101` | `SWOGLWindow::ShowImage`: added conditional byteswap on BE for XFB display — converts native u32 byte order to GL_RGBA byte order before `glTexImage2D` upload. |
 | `PulseAudioStream.cpp:88` | `PA_SAMPLE_S16LE` → `PA_SAMPLE_S16NE` (BE host was telling PulseAudio that BE sample data is LE — caused static noise on all audio output). |
 
@@ -243,16 +245,37 @@ Wiimote unions are not needed for GC-only use (Swiss on a GameCube).
 
 **Status:** Needs algorithmic fix. The LFG algorithm needs to be made endian-independent or replaced with a portable implementation.
 
-### 2. OGL Backend — Black Screen
-OpenGL backend shows a black screen (no OSD, no game output) on R600 with Mesa. The software renderer works (produces visible output). Possible causes:
-- EFB copy pipeline (shader) fails to compile on R600 → VRAM copy texture uninitialized (black)
-- Post-processor/XFB display shader fails to compile
-- GL context/swapchain creation issues
-- Texture format or uniform upload issues on BE
+### 2. OGL Backend — Black Screen (FIXED)
+OpenGL backend shows a black screen (no OSD, no game output) on R600 with Mesa.
 
-**Status:** Needs investigation with the R600 GL driver. Try running with `MESA_GLSL=1` or `R600_DEBUG=*` to check for shader compilation errors.
+**Root cause:** Persistent mapped buffers (`BufferStorage` via `glBufferStorage` + `GL_MAP_PERSISTENT_BIT`) write data in host byte order directly to GPU-visible memory. On BE, the CPU writes BE byte order, but the GPU (always LE) reads these values as LE. This corrupts ALL UBO data (dimensions, strides, offsets, matrices, colors), vertex data, and SSBO data — causing every shader to receive garbage parameters, producing zero output → black screen.
 
-### 3. Vulkan Renderer
+`MapAndSync`/`MapAndOrphan` use `glMapBufferRange` + `glUnmapBuffer`, where `glUnmapBuffer` lets the GL driver byteswap transparently — these work correctly.
+
+**Fix:** Added `if constexpr (std::endian::native != std::endian::big)` guard in `OGLStreamBuffer.cpp:CreateStreamBuffer()` to skip `BufferStorage` and `PinnedMemory` on BE, falling through to `MapAndSync`. Also made `UsePersistentStagingBuffers()` return `false` on BE in `OGLTexture.cpp`.
+
+The GPU texture decode compute shaders (`TextureConversionShader.cpp`) are endian-safe — `Swap16()` correctly converts GPU-LE to game-BE.
+
+On BE, Mesa on UMA reads buffer data as-is (no byteswap on unmap), but `MapAndSync`/`MapAndOrphan` use `glMapBufferRange` + `glUnmapBuffer` which Mesa handles correctly for the scalar/struct UBO data — the persistent buffer avoidance alone is sufficient for UBO correctness.
+
+### 3. OGL Vertex Blast (3D Models Only)
+
+**Status:** UNFIXED
+
+**Symptom:** GC IPL logo renders perfectly (simple textured quad, 4 vertices, 6 indices). Luigi's Mansion 3D models have vertex blast (spiky geometry).
+
+**Root cause hypothesis:** Mesa byteswaps `GL_ARRAY_BUFFER` data during `glBufferSubData`, but does NOT byteswap `GL_ELEMENT_ARRAY_BUFFER` data. On BE host, `IndexGenerator::AddIndices` writes indices in host byte order (BE). These go through `BufferSubData::Unmap` → `glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, ...)`, but Mesa does not apply byte-swapping to element array buffers → GPU receives BE indices → wrong vertex lookups → spiky geometry.
+
+The IPL logo's 6 indices over 4 vertices produce acceptable-looking results even with wrong index byte order because only 2 triangles share 4 vertices. Complex models with hundreds of vertices experience severe index corruption.
+
+**Past attempts:**
+- `DataWrite`/`IndexGenerator` explicit byteswap (reverted): Caused double-swap regression in IPL — Mesa already swapped `GL_ARRAY_BUFFER` (vertex) data, so swapping again produced wrong vertex positions. These changes affected both vertex and index data paths together.
+- `BufferSubData` orphan-on-wrap (still committed): `glBufferData(nullptr, GL_STREAM_DRAW)` on wrap. Resolved flashing trees (Luigi's Mansion). GC IPL works fine with this. Not the cause of vertex blast.
+
+**Next steps:**
+- Isolate index byteswap from vertex byteswap: swap u16 indices at the `IndexGenerator` level only (leave `DataWrite`/vertex data unswapped). Mesa's `GL_ARRAY_BUFFER` byteswap handles vertices correctly, but `GL_ELEMENT_ARRAY_BUFFER` indices need explicit swap before upload.
+
+### 4. Vulkan Renderer
 Not needed for R600 (OpenGL only scenario), but the Vulkan backend may have endian assumptions.
 
 ## Architectural Notes for Future JIT Port

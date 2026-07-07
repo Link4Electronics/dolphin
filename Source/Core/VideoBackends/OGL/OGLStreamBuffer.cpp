@@ -3,6 +3,8 @@
 
 #include "VideoBackends/OGL/OGLStreamBuffer.h"
 
+#include <bit>
+
 #include "Common/Align.h"
 #include "Common/MathUtil.h"
 #include "Common/MemoryUtil.h"
@@ -302,6 +304,9 @@ public:
  * As everything must be copied before glBufferSubData returns,
  * an additional memcpy in the driver will be done.
  * So this is a huge overhead, only use it if required.
+ *
+ * On big-endian hosts, Mesa byteswaps the data during the glBufferSubData copy,
+ * converting BE host data to LE GPU data automatically.
  */
 class BufferSubData : public StreamBuffer
 {
@@ -309,13 +314,26 @@ public:
   BufferSubData(u32 type, u32 size) : StreamBuffer(type, size)
   {
     glBindBuffer(m_buffertype, m_buffer);
-    glBufferData(m_buffertype, size, nullptr, GL_STATIC_DRAW);
+    glBufferData(m_buffertype, size, nullptr, GL_STREAM_DRAW);
     m_pointer = new u8[m_size];
   }
 
   ~BufferSubData() override { delete[] m_pointer; }
-  std::pair<u8*, u32> Map(u32 size) override { return std::make_pair(m_pointer, 0); }
-  void Unmap(u32 used_size) override { glBufferSubData(m_buffertype, 0, used_size, m_pointer); }
+  std::pair<u8*, u32> Map(u32 size) override
+  {
+    if (m_iterator + size >= m_size)
+    {
+      glBufferData(m_buffertype, m_size, nullptr, GL_STREAM_DRAW);
+      m_iterator = 0;
+    }
+    return std::make_pair(m_pointer + m_iterator, m_iterator);
+  }
+  void Unmap(u32 used_size) override
+  {
+    if (used_size)
+      glBufferSubData(m_buffertype, m_iterator, used_size, m_pointer + m_iterator);
+    m_iterator += used_size;
+  }
   u8* m_pointer;
 };
 
@@ -359,18 +377,24 @@ std::unique_ptr<StreamBuffer> StreamBuffer::Create(u32 type, u32 size)
   // Prefer the syncing buffers over the orphaning one
   if (g_ogl_config.bSupportsGLSync)
   {
-    // pinned memory is much faster than buffer storage on AMD cards
-    if (g_ogl_config.bSupportsGLPinnedMemory &&
-        !(DriverDetails::HasBug(DriverDetails::BUG_BROKEN_PINNED_MEMORY)))
-      return std::make_unique<PinnedMemory>(type, size);
+    // Persistent/direct-access buffer mappings write data in host byte order.
+    // On big-endian hosts this would be BE, but the GPU reads LE — skip these
+    // paths on BE and fall through to MapAndSync which lets the driver byteswap.
+    if constexpr (std::endian::native != std::endian::big)
+    {
+      // pinned memory is much faster than buffer storage on AMD cards
+      if (g_ogl_config.bSupportsGLPinnedMemory &&
+          !(DriverDetails::HasBug(DriverDetails::BUG_BROKEN_PINNED_MEMORY)))
+        return std::make_unique<PinnedMemory>(type, size);
 
-    // buffer storage works well in most situations
-    if (g_ogl_config.bSupportsGLBufferStorage &&
-        !(DriverDetails::HasBug(DriverDetails::BUG_BROKEN_BUFFER_STORAGE) &&
-          type == GL_ARRAY_BUFFER) &&
-        !(DriverDetails::HasBug(DriverDetails::BUG_INTEL_BROKEN_BUFFER_STORAGE) &&
-          type == GL_ELEMENT_ARRAY_BUFFER))
-      return std::make_unique<BufferStorage>(type, size);
+      // buffer storage works well in most situations
+      if (g_ogl_config.bSupportsGLBufferStorage &&
+          !(DriverDetails::HasBug(DriverDetails::BUG_BROKEN_BUFFER_STORAGE) &&
+            type == GL_ARRAY_BUFFER) &&
+          !(DriverDetails::HasBug(DriverDetails::BUG_INTEL_BROKEN_BUFFER_STORAGE) &&
+            type == GL_ELEMENT_ARRAY_BUFFER))
+        return std::make_unique<BufferStorage>(type, size);
+    }
 
     // don't fall back to MapAnd* for Nvidia drivers
     if (DriverDetails::HasBug(DriverDetails::BUG_BROKEN_UNSYNC_MAPPING))
@@ -378,6 +402,15 @@ std::unique_ptr<StreamBuffer> StreamBuffer::Create(u32 type, u32 size)
       if (DriverDetails::HasBug(DriverDetails::BUG_BROKEN_BUFFER_STREAM))
         return std::make_unique<BufferData>(type, size);
       else
+        return std::make_unique<BufferSubData>(type, size);
+    }
+
+    // On BE, use BufferSubData for vertex/index buffers — Mesa byteswaps
+    // during glBufferSubData, converting BE host data to LE GPU data.
+    // UBO/texel buffers stay on MapAndSync with explicit BEByteSwap32.
+    if constexpr (std::endian::native == std::endian::big)
+    {
+      if (type == GL_ARRAY_BUFFER || type == GL_ELEMENT_ARRAY_BUFFER)
         return std::make_unique<BufferSubData>(type, size);
     }
 

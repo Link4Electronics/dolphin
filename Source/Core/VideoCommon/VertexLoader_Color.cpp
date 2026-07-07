@@ -131,7 +131,7 @@ void Color_ReadIndex_16b_4444(VertexLoader* loader)
 
   u16 value;
   std::memcpy(&value, address, sizeof(u16));
-
+  value = Common::FromBigEndian(value);
   SetCol4444(loader, value);
 }
 
@@ -173,11 +173,7 @@ void Color_ReadDirect_16b_565(VertexLoader* loader)
 
 void Color_ReadDirect_16b_4444(VertexLoader* loader)
 {
-  u16 value;
-  std::memcpy(&value, DataGetPosition(), sizeof(u16));
-
-  SetCol4444(loader, value);
-  DataSkip(2);
+  SetCol4444(loader, DataRead<u16>());
 }
 
 void Color_ReadDirect_24b_6666(VertexLoader* loader)
@@ -188,7 +184,8 @@ void Color_ReadDirect_24b_6666(VertexLoader* loader)
 
 void Color_ReadDirect_32b_8888(VertexLoader* loader)
 {
-  SetCol(loader, DataReadU32Unswapped());
+  SetCol(loader, Read32(DataGetPosition()));
+  DataSkip(4);
 }
 
 using Row = Common::EnumMap<TPipelineFunction, ColorFormat::RGBA8888>;

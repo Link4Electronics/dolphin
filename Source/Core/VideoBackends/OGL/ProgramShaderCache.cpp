@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <bit>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -16,6 +17,7 @@
 #include "Common/CommonTypes.h"
 #include "Common/FileUtil.h"
 #include "Common/GL/GLContext.h"
+#include "Common/Swap.h"
 #include "Common/GL/GLUtil.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
@@ -221,6 +223,16 @@ u32 ProgramShaderCache::GetUniformBufferAlignment()
   return s_ubo_align;
 }
 
+static inline void BEByteSwap32(void* data, size_t size)
+{
+  if constexpr (std::endian::native == std::endian::big)
+  {
+    u32* words = static_cast<u32*>(data);
+    for (size_t i = 0; i < size / sizeof(u32); i++)
+      words[i] = Common::swap32(words[i]);
+  }
+}
+
 void ProgramShaderCache::UploadConstants()
 {
   auto& system = Core::System::GetInstance();
@@ -235,10 +247,12 @@ void ProgramShaderCache::UploadConstants()
     auto buffer = s_buffer->Map(s_ubo_buffer_size + custom_constants_size, s_ubo_align);
 
     memcpy(buffer.first, &pixel_shader_manager.constants, sizeof(PixelShaderConstants));
+    BEByteSwap32(buffer.first, sizeof(PixelShaderConstants));
 
     u64 size = Common::AlignUp(sizeof(PixelShaderConstants), s_ubo_align);
 
     memcpy(buffer.first + size, &vertex_shader_manager.constants, sizeof(VertexShaderConstants));
+    BEByteSwap32(buffer.first + size, sizeof(VertexShaderConstants));
     size += Common::AlignUp(sizeof(VertexShaderConstants), s_ubo_align);
 
     if (!pixel_shader_manager.custom_constants.empty())
@@ -250,6 +264,7 @@ void ProgramShaderCache::UploadConstants()
 
     memcpy(buffer.first + size, &geometry_shader_manager.constants,
            sizeof(GeometryShaderConstants));
+    BEByteSwap32(buffer.first + size, sizeof(GeometryShaderConstants));
 
     s_buffer->Unmap(s_ubo_buffer_size + custom_constants_size);
 
@@ -284,6 +299,7 @@ void ProgramShaderCache::UploadConstants(const void* data, u32 data_size)
   const u32 alloc_size = Common::AlignUp(data_size, s_ubo_align);
   auto buffer = s_buffer->Map(alloc_size, s_ubo_align);
   std::memcpy(buffer.first, data, data_size);
+  BEByteSwap32(buffer.first, data_size);
   s_buffer->Unmap(alloc_size);
 
   // bind the same sub-buffer to all stages
