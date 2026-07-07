@@ -164,6 +164,8 @@ std::optional<IPCReply> BluetoothEmuDevice::IOCtlV(const IOCtlVRequest& request)
       DEBUG_ASSERT(HCI_BC_FLAG(con_handle) == HCI_POINT2POINT);
       DEBUG_ASSERT(HCI_PB_FLAG(con_handle) == HCI_PACKET_START);
 
+      INFO_LOG_FMT(IOS_WIIMOTE, "ACL_DATA_OUT: con_handle={:#06x} length={}", con_handle, length);
+
       SendToDevice(HCI_CON_HANDLE(con_handle),
                    memory.GetPointerForRange(ctrl.data_address + sizeof(hci_acldata_hdr_t), length),
                    length);
@@ -172,7 +174,7 @@ std::optional<IPCReply> BluetoothEmuDevice::IOCtlV(const IOCtlVRequest& request)
     case ACL_DATA_IN:  // We are given an ACL buffer to fill
     {
       m_acl_endpoint = std::make_unique<USB::V0BulkMessage>(GetEmulationKernel(), request);
-      DEBUG_LOG_FMT(IOS_WIIMOTE, "ACL_DATA_IN: {:#010x}", request.address);
+      INFO_LOG_FMT(IOS_WIIMOTE, "ACL_DATA_IN: {:#010x}", request.address);
       send_reply = false;
       break;
     }
@@ -234,8 +236,7 @@ void BluetoothEmuDevice::SendACLPacket(const bdaddr_t& source, const u8* data, u
 
   if (m_acl_endpoint && !m_hci_endpoint && m_event_queue.empty())
   {
-    DEBUG_LOG_FMT(IOS_WIIMOTE, "ACL endpoint valid, sending packet to {:08x}",
-                  m_acl_endpoint->ios_request.address);
+    INFO_LOG_FMT(IOS_WIIMOTE, "SendACLPacket: direct (conn_handle={:#06x})", connection_handle);
 
     auto& system = GetSystem();
     auto& memory = system.GetMemory();
@@ -254,7 +255,9 @@ void BluetoothEmuDevice::SendACLPacket(const bdaddr_t& source, const u8* data, u
   }
   else
   {
-    DEBUG_LOG_FMT(IOS_WIIMOTE, "ACL endpoint not currently valid, queuing...");
+    INFO_LOG_FMT(IOS_WIIMOTE, "SendACLPacket: queuing (conn_handle={:#06x}, acl_endpoint={}, hci_endpoint={}, event_queue={})",
+                 connection_handle, m_acl_endpoint != nullptr, m_hci_endpoint != nullptr,
+                 m_event_queue.size());
     m_acl_pool.Store(data, size, connection_handle);
   }
 }
@@ -315,8 +318,8 @@ void BluetoothEmuDevice::Update()
   {
     // an endpoint has become available, and we have a stored response.
     const SQueuedEvent& event = m_event_queue.front();
-    DEBUG_LOG_FMT(IOS_WIIMOTE, "HCI event {:x} being written from queue ({}) to {:08x}...",
-                  ((hci_event_hdr_t*)event.buffer)->event, m_event_queue.size() - 1,
+    INFO_LOG_FMT(IOS_WIIMOTE, "HCI event drain from queue ({}) to {:08x}",
+                  m_event_queue.size() - 1,
                   m_hci_endpoint->ios_request.address);
     m_hci_endpoint->FillBuffer(event.buffer, event.size);
 
@@ -329,6 +332,8 @@ void BluetoothEmuDevice::Update()
   // check ACL queue
   if (!m_acl_pool.IsEmpty() && m_acl_endpoint && m_event_queue.empty())
   {
+    INFO_LOG_FMT(IOS_WIIMOTE, "ACL pool flush to {:08x} (empty={})",
+                 m_acl_endpoint->ios_request.address, m_acl_pool.IsEmpty());
     m_acl_pool.WriteToEndpoint(*m_acl_endpoint);
     m_acl_endpoint.reset();
   }
