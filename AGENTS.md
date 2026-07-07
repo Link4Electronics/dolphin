@@ -271,6 +271,14 @@ All Wiimote-related bitfield structs are now fixed.
 | `IOSC.cpp:512,514,516` | `Common::swap32` → `Common::ToBigEndian` for `MakeBlankEccCert` fields (signature.type, header.public_key_type, header.id) — struct is serialized to BE format for the emulated PPC. |
 | `IOSC.cpp:645-648` | `Common::swap32(dump.*)` → `Common::FromBigEndian(dump.*)` in `LoadEntries()` — `BootMiiKeyDump` fields are BE on disk. |
 
+### InputCommon/XInput2 (Mouse buttons not registering on BE)
+
+| File | Change |
+|------|--------|
+| `XInput2.cpp:290-293` | Replaced `memcpy` of X11 `unsigned char*` button mask into `u64` with explicit byte-by-byte construction. X11 mask is a byte array where byte N stores buttons N*8..N*8+7. On LE, `memcpy` into u64 places byte 0 at bits 0-7 (correct). On BE, `memcpy` places byte 0 at bits 63-56, so `>> 1` then truncation to u32 lost all buttons. Fix: `for (size_t i = 0; i < copy_len; ++i) buttons_zero_indexed \|= static_cast<u64>(button_state.mask[i]) << (i * 8);` |
+
+**Root cause:** X11's `XIButtonState.mask` is an `unsigned char*` byte array where bit 0 of byte 0 = button 1. The code used `memcpy` to pack this into a `u64`, which on BE placed byte 0 in the highest byte (MSB). The right-shift by 1 (for 1→0 index conversion) then pushed all meaningful bits out of the `u32` range, effectively making every mouse button appear released. This broke all mouse-click-based wiimote input (e.g., default A="Click 1", B="Click 3" mappings on X11).
+
 ### Core/IOS/Network/KD (NWC24/WC24 - Magic mismatch errors)
 
 | File | Change |
