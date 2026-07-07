@@ -184,6 +184,20 @@ Wiimote unions are not needed for GC-only use (Swiss on a GameCube).
 | `SWOGLWindow.cpp:93-101` | `SWOGLWindow::ShowImage`: added conditional byteswap on BE for XFB display — converts native u32 byte order to GL_RGBA byte order before `glTexImage2D` upload. |
 | `PulseAudioStream.cpp:88` | `PA_SAMPLE_S16LE` → `PA_SAMPLE_S16NE` (BE host was telling PulseAudio that BE sample data is LE — caused static noise on all audio output). |
 
+### SW EFB Interface (color inversion fix)
+
+| File | Change |
+|------|--------|
+| `SWEfbInterface.cpp:28-47` | Added `ReadU32LE()`/`WriteU32LE()` helpers — wrap `memcpy`+`swap32` on BE to read/write LE-style u32 from ABGR byte arrays. The SW EFB stores pixels in `std::array<u8>` but accesses them via `*(u32*)` casts assuming LE byte layout. On BE, these casts reversed the 4 bytes, swapping ABGR → RGBA ordering on every EFB read/write, causing `ChannelComponentIndex` indexing to retrieve wrong components. |
+| `SWEfbInterface.cpp:52-62` | `SetPixelAlphaOnly`: replaced `*(u32*)&efb` RMW with `ReadU32LE`/`WriteU32LE`. |
+| `SWEfbInterface.cpp:64-103` | `SetPixelColorOnly`: replaced `*(u32*)rgb` and `*(u32*)&efb` with `ReadU32LE`/`WriteU32LE`. |
+| `SWEfbInterface.cpp:105-145` | `SetPixelAlphaColor`: same fix. |
+| `SWEfbInterface.cpp:147-170` | `GetPixelColor`: `memcpy` read + `swap32` on BE via `ReadU32LE`. |
+| `SWEfbInterface.cpp:193-247` | `SetPixelDepth`/`GetPixelDepth`: same `ReadU32LE`/`WriteU32LE` fix. |
+| `SWEfbInterface.cpp:431-452` | `BlendTev`: byteswap `dstClr` on BE before `(u8*)&dstClr` cast so the byte pointer yields correct ABGR channel order. `LogicBlend` path uses `ReadU32LE(color)` instead of `*((u32*)color)`. |
+
+**Root cause:** The SW EFB uses `*(u32*)ptr` to read/write u32 values from/to a `u8[]` pixel array. The color array is `{alpha, blue, green, red}` by `ChannelComponentIndex` (ALP_C=0, BLU_C=1, GRN_C=2, RED_C=3). On LE, `*(u32*)` reads bytes `[A,B,G,R]` → u32 = `A|B<<8|G<<16|R<<24` (the intended LE layout). On BE, it reads `[A,B,G,R]` → u32 = `A<<24|B<<16|G<<8|R` (bytes reversed in u32 bits). All bit-manipulation expressions (masks, shifts) are designed for the LE value, producing garbage on BE. The fix wraps every u32 load/store in `ReadU32LE()`/`WriteU32LE()` which byteswaps on BE, restoring the intended LE semantics.
+
 ### SI / EXI
 
 | File | Change |
@@ -228,7 +242,16 @@ Wiimote unions are not needed for GC-only use (Swiss on a GameCube).
 
 **Status:** Needs algorithmic fix. The LFG algorithm needs to be made endian-independent or replaced with a portable implementation.
 
-### 2. Vulkan Renderer
+### 2. OGL Backend — Black Screen
+OpenGL backend shows a black screen (no OSD, no game output) on R600 with Mesa. The software renderer works (produces visible output). Possible causes:
+- EFB copy pipeline (shader) fails to compile on R600 → VRAM copy texture uninitialized (black)
+- Post-processor/XFB display shader fails to compile
+- GL context/swapchain creation issues
+- Texture format or uniform upload issues on BE
+
+**Status:** Needs investigation with the R600 GL driver. Try running with `MESA_GLSL=1` or `R600_DEBUG=*` to check for shader compilation errors.
+
+### 3. Vulkan Renderer
 Not needed for R600 (OpenGL only scenario), but the Vulkan backend may have endian assumptions.
 
 ## Architectural Notes for Future JIT Port

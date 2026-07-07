@@ -5,11 +5,13 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstring>
 #include <vector>
 
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
+#include "Common/Swap.h"
 
 #include "Core/Config/GraphicsSettings.h"
 
@@ -24,6 +26,28 @@ namespace EfbInterface
 static std::array<u8, EFB_WIDTH * EFB_HEIGHT * 6> efb;
 
 static std::array<u32, PQ_NUM_MEMBERS> perf_values;
+
+// Read a u32 from an ABGR byte array as if on little-endian (the internal color format).
+// On LE: memcpy bytes → unchanged.
+// On BE: memcpy bytes → swap32 (converts MSB-first to LE-style u32).
+static inline u32 ReadU32LE(const u8* ptr)
+{
+  u32 val;
+  std::memcpy(&val, ptr, sizeof(val));
+  if constexpr (std::endian::native == std::endian::big)
+    val = Common::swap32(val);
+  return val;
+}
+
+// Write a LE-style u32 into an ABGR byte array.
+// On LE: swap32(val) → memcpy.
+// On BE: memcpy the swapped value.
+static inline void WriteU32LE(u8* ptr, u32 val)
+{
+  if constexpr (std::endian::native == std::endian::big)
+    val = Common::swap32(val);
+  std::memcpy(ptr, &val, sizeof(val));
+}
 
 static inline u32 GetColorOffset(u16 x, u16 y)
 {
@@ -49,10 +73,10 @@ static void SetPixelAlphaOnly(u32 offset, u8 a)
   case PixelFormat::RGBA6_Z24:
   {
     u32 a32 = a;
-    u32* dst = (u32*)&efb[offset];
-    u32 val = *dst & 0xffffffc0;
+    u32 val = ReadU32LE(&efb[offset]);
+    val &= 0xffffffc0;
     val |= (a32 >> 2) & 0x0000003f;
-    *dst = val;
+    WriteU32LE(&efb[offset], val);
   }
   break;
   default:
@@ -63,37 +87,35 @@ static void SetPixelAlphaOnly(u32 offset, u8 a)
 
 static void SetPixelColorOnly(u32 offset, u8* rgb)
 {
+  const u32 src = ReadU32LE(rgb);
   switch (bpmem.zcontrol.pixel_format)
   {
   case PixelFormat::RGB8_Z24:
   case PixelFormat::Z24:
   {
-    u32 src = *(u32*)rgb;
-    u32* dst = (u32*)&efb[offset];
-    u32 val = *dst & 0xff000000;
+    u32 val = ReadU32LE(&efb[offset]);
+    val &= 0xff000000;
     val |= src >> 8;
-    *dst = val;
+    WriteU32LE(&efb[offset], val);
   }
   break;
   case PixelFormat::RGBA6_Z24:
   {
-    u32 src = *(u32*)rgb;
-    u32* dst = (u32*)&efb[offset];
-    u32 val = *dst & 0xff00003f;
+    u32 val = ReadU32LE(&efb[offset]);
+    val &= 0xff00003f;
     val |= (src >> 4) & 0x00000fc0;  // blue
     val |= (src >> 6) & 0x0003f000;  // green
     val |= (src >> 8) & 0x00fc0000;  // red
-    *dst = val;
+    WriteU32LE(&efb[offset], val);
   }
   break;
   case PixelFormat::RGB565_Z16:
   {
     // TODO: RGB565_Z16 is not supported correctly yet
-    u32 src = *(u32*)rgb;
-    u32* dst = (u32*)&efb[offset];
-    u32 val = *dst & 0xff000000;
+    u32 val = ReadU32LE(&efb[offset]);
+    val &= 0xff000000;
     val |= src >> 8;
-    *dst = val;
+    WriteU32LE(&efb[offset], val);
   }
   break;
   default:
@@ -104,38 +126,36 @@ static void SetPixelColorOnly(u32 offset, u8* rgb)
 
 static void SetPixelAlphaColor(u32 offset, u8* color)
 {
+  const u32 src = ReadU32LE(color);
   switch (bpmem.zcontrol.pixel_format)
   {
   case PixelFormat::RGB8_Z24:
   case PixelFormat::Z24:
   {
-    u32 src = *(u32*)color;
-    u32* dst = (u32*)&efb[offset];
-    u32 val = *dst & 0xff000000;
+    u32 val = ReadU32LE(&efb[offset]);
+    val &= 0xff000000;
     val |= src >> 8;
-    *dst = val;
+    WriteU32LE(&efb[offset], val);
   }
   break;
   case PixelFormat::RGBA6_Z24:
   {
-    u32 src = *(u32*)color;
-    u32* dst = (u32*)&efb[offset];
-    u32 val = *dst & 0xff000000;
+    u32 val = ReadU32LE(&efb[offset]);
+    val = (val & 0xff000000);  // preserve Z byte
     val |= (src >> 2) & 0x0000003f;  // alpha
     val |= (src >> 4) & 0x00000fc0;  // blue
     val |= (src >> 6) & 0x0003f000;  // green
     val |= (src >> 8) & 0x00fc0000;  // red
-    *dst = val;
+    WriteU32LE(&efb[offset], val);
   }
   break;
   case PixelFormat::RGB565_Z16:
   {
     // TODO: RGB565_Z16 is not supported correctly yet
-    u32 src = *(u32*)color;
-    u32* dst = (u32*)&efb[offset];
-    u32 val = *dst & 0xff000000;
+    u32 val = ReadU32LE(&efb[offset]);
+    val &= 0xff000000;
     val |= src >> 8;
-    *dst = val;
+    WriteU32LE(&efb[offset], val);
   }
   break;
   default:
@@ -146,8 +166,7 @@ static void SetPixelAlphaColor(u32 offset, u8* color)
 
 static u32 GetPixelColor(u32 offset)
 {
-  u32 src;
-  std::memcpy(&src, &efb[offset], sizeof(u32));
+  const u32 src = ReadU32LE(&efb[offset]);
 
   switch (bpmem.zcontrol.pixel_format)
   {
@@ -179,19 +198,19 @@ static void SetPixelDepth(u32 offset, u32 depth)
   case PixelFormat::RGBA6_Z24:
   case PixelFormat::Z24:
   {
-    u32* dst = (u32*)&efb[offset];
-    u32 val = *dst & 0xff000000;
+    u32 val = ReadU32LE(&efb[offset]);
+    val &= 0xff000000;
     val |= depth & 0x00ffffff;
-    *dst = val;
+    WriteU32LE(&efb[offset], val);
   }
   break;
   case PixelFormat::RGB565_Z16:
   {
     // TODO: RGB565_Z16 is not supported correctly yet
-    u32* dst = (u32*)&efb[offset];
-    u32 val = *dst & 0xff000000;
+    u32 val = ReadU32LE(&efb[offset]);
+    val &= 0xff000000;
     val |= depth & 0x00ffffff;
-    *dst = val;
+    WriteU32LE(&efb[offset], val);
   }
   break;
   default:
@@ -210,13 +229,13 @@ static u32 GetPixelDepth(u32 offset)
   case PixelFormat::RGBA6_Z24:
   case PixelFormat::Z24:
   {
-    depth = (*(u32*)&efb[offset]) & 0x00ffffff;
+    depth = ReadU32LE(&efb[offset]) & 0x00ffffff;
   }
   break;
   case PixelFormat::RGB565_Z16:
   {
     // TODO: RGB565_Z16 is not supported correctly yet
-    depth = (*(u32*)&efb[offset]) & 0x00ffffff;
+    depth = ReadU32LE(&efb[offset]) & 0x00ffffff;
   }
   break;
   default:
@@ -414,6 +433,10 @@ void BlendTev(u16 x, u16 y, u8* color)
   const u32 offset = GetColorOffset(x, y);
   u32 dstClr = GetPixelColor(offset);
 
+  // GetPixelColor returns a LE-style u32 (A/B/G/R in byte0/1/2/3).
+  // On BE, byteswap so the u8* cast gives ABGR byte order.
+  if constexpr (std::endian::native == std::endian::big)
+    dstClr = Common::swap32(dstClr);
   u8* dstClrPtr = (u8*)&dstClr;
 
   if (bpmem.blendmode.blend_enable)
@@ -425,7 +448,12 @@ void BlendTev(u16 x, u16 y, u8* color)
   }
   else if (bpmem.blendmode.logic_op_enable)
   {
-    LogicBlend(*((u32*)color), &dstClr, bpmem.blendmode.logic_mode);
+    const u32 src_clr = ReadU32LE(color);
+    LogicBlend(src_clr, &dstClr, bpmem.blendmode.logic_mode);
+    // Restore dstClrPtr from the (possibly swapped) dstClr for the write below
+    if constexpr (std::endian::native == std::endian::big)
+      dstClr = Common::swap32(dstClr);
+    dstClrPtr = (u8*)&dstClr;
   }
   else
   {
