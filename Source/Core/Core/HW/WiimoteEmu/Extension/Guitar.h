@@ -32,6 +32,19 @@ class Guitar : public Extension1stParty
 public:
   struct DataFormat
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u8 pad1 : 2;  // 1 on gh3, 0 on ghwt
+    u8 sx : 6;
+
+    u8 pad2 : 2;  // 1 on gh3, 0 on ghwt
+    u8 sy : 6;
+
+    u8 pad3 : 3;  // always 0
+    u8 sb : 5;    // not used in gh3
+
+    u8 pad4 : 3;  // always 0
+    u8 whammy : 5;
+#else
     u8 sx : 6;
     u8 pad1 : 2;  // 1 on gh3, 0 on ghwt
 
@@ -43,6 +56,7 @@ public:
 
     u8 whammy : 5;
     u8 pad4 : 3;  // always 0
+#endif
 
     u16 bt;  // buttons
   };

@@ -40,6 +40,28 @@ public:
 
   struct DataFormat
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    // Seemingly random.
+    u8 unk1 : 2;
+    u8 stick_x : 6;
+
+    // Seemingly random.
+    u8 unk2 : 2;
+    u8 stick_y : 6;
+
+    // For which "pad" the velocity data is for.
+    u8 velocity_id : 7;
+    u8 velocity3 : 1;
+
+    u8 velocity4 : 3;
+    // 1 with no velocity data and 0 when velocity data is present.
+    u8 no_velocity_data_2 : 1;
+    // These two bits seem to always be set. (0b11)
+    u8 unk5 : 2;
+    // 1 with no velocity data and 0 when velocity data is present.
+    u8 no_velocity_data_1 : 1;
+    u8 velocity2 : 1;
+#else
     u8 stick_x : 6;
     // Seemingly random.
     u8 unk1 : 2;
@@ -62,6 +84,7 @@ public:
     u8 no_velocity_data_2 : 1;
 
     u8 velocity4 : 3;
+#endif
 
     // Button bits.
     union

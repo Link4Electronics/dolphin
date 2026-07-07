@@ -152,18 +152,40 @@ The new conditional functions use `std::endian::native` (C++20) to only swap whe
 
 **Root cause (EXI):** Same GCC MSB-first bitfield issue. The `UEXI_STATUS` and `UEXI_CONTROL` bitfields are allocated at wrong positions on BE, causing EXI status and control register reads to return garbage. Swiss reads `EXI_STATUS` → wrong chip select / device detection → computes invalid address `0x0C00688C` → invalid MMIO read.
 
-### Remaining Native C++ Bitfield Unions
+### Native C++ Bitfield Unions (Wiimote + Misc)
 
-| File | Union | Line | Bit Width | Fields | Status |
+| File | Union/Struct | Line | Bit Width | Fields | Status |
 |------|-------|------|-----------|--------|--------|
 | `SI/SI_Device.h` | `UCommand` | 73 | u32 (8+8+8+8) | parameter1, parameter2, command, pad | **FIXED** |
 | `EXI/EXI_DeviceMic.h` | `UStatus` | 45 | u16 (4+1+3+1+1+1+2+2+1) | out, id, button_unk, button, buff_ovrflw, gain, sample_rate, buff_size, is_active | **FIXED** |
-| `WiimoteCommon/WiimoteReport.h` | `ButtonData` | 162 | u16 (16x1) | left, right, down, up, plus, acc_bits(2), unknown, two, one, b, a, minus, acc_bits2(2), home | **UNFIXED** |
-| `WiimoteEmu/Extension/Nunchuk.h` | `ButtonFormat` | 38 | u8 (1+1+2+2+2) | z, c, acc_x_lsb, acc_y_lsb, acc_z_lsb | **UNFIXED** |
-| `WiimoteEmu/Extension/Classic.h` | `ButtonFormat` | 34 | u16 (15x1 + 1pad) | rt, plus, home, minus, lt, dpad_down, dpad_right, dpad_up, dpad_left, zr, x, a, y, b, zl, pad | **UNFIXED** |
-| `WiimoteEmu/Extension/Turntable.h` | anonymous | 49 | u16 (1) | ltable2 | **UNFIXED** |
+| `WiimoteCommon/WiimoteReport.h` | `ButtonData` | 162 | u16 (16x1) | left, right, down, up, plus, acc_bits(2), unknown, two, one, b, a, minus, acc_bits2(2), home | **FIXED** |
+| `WiimoteCommon/WiimoteReport.h` | `OutputReportRumble` | 38 | u8 (1) | rumble | **FIXED** |
+| `WiimoteCommon/WiimoteReport.h` | `OutputReportEnableFeature` | 46 | u8 (1+1+1) | rumble, ack, enable | **FIXED** |
+| `WiimoteCommon/WiimoteReport.h` | `OutputReportLeds` | 80 | u8 (1+1+2+4) | rumble, ack, pad(2), leds | **FIXED** |
+| `WiimoteCommon/WiimoteReport.h` | `OutputReportMode` | 91 | u8 (1+1+1+5) | rumble, ack, continuous, pad(5) | **FIXED** |
+| `WiimoteCommon/WiimoteReport.h` | `OutputReportRequestStatus` | 103 | u8 (1+7) | rumble, pad(7) | **FIXED** |
+| `WiimoteCommon/WiimoteReport.h` | `OutputReportWriteData` | 142 | u8×2 (1+1+2+4, 1+7) | rumble, pad(1), space(2), pad(4), i2c_rw_ignored, slave_address | **FIXED** |
+| `WiimoteCommon/WiimoteReport.h` | `OutputReportReadData` | 170 | u8×2 (1+1+2+4, 1+7) | rumble, pad(1), space(2), pad(4), i2c_rw_ignored, slave_address | **FIXED** |
+| `WiimoteCommon/WiimoteReport.h` | `OutputReportSpeakerData` | 197 | u8 (1+2+5) | rumble, pad(2), length | **FIXED** |
+| `WiimoteCommon/WiimoteReport.h` | `InputReportStatus` | 265 | u8 (1+1+1+1+4) | battery_low, extension, speaker, ir, leds | **FIXED** |
+| `WiimoteCommon/WiimoteReport.h` | `InputReportReadDataReply` | 314 | u8 (4+4) | error, size_minus_one | **FIXED** |
+| `WiimoteCommon/WiimoteReport.h` | `AccelCalibrationData` | 382 | u8 (7+1) | volume, motor | **FIXED** |
+| `WiimoteEmu/Extension/Nunchuk.h` | `ButtonFormat` | 38 | u8 (1+1+2+2+2) | z, c, acc_x_lsb, acc_y_lsb, acc_z_lsb | **FIXED** |
+| `WiimoteEmu/Extension/Classic.h` | `ButtonFormat` | 34 | u16 (15x1 + 1pad) | rt, plus, home, minus, lt, dpad_down, dpad_right, dpad_up, dpad_left, zr, x, a, y, b, zl, pad | **FIXED** |
+| `WiimoteEmu/Extension/Turntable.h` | anonymous | 49 | u16 (1) | ltable2 | **FIXED** |
+| `WiimoteEmu/Extension/UDrawTablet.h` | stylus fields | — | u8 (4+4,4+4) | stylus_x2, stylus_y2 | **FIXED** |
 
-Wiimote unions are not needed for GC-only use (Swiss on a GameCube).
+All Wiimote-related bitfield structs are now fixed.
+
+### Wiimote Emulator (endian fixes beyond bitfields)
+
+| File | Change |
+|------|--------|
+| `WiimoteCommon/DataReport.cpp` | All `BitCastPtr<CoreData>` reads/writes to HID report buffer wrapped with `FromLittleEndian`/`ToLittleEndian`. Affects `IncludeCore`, `IncludeAccel`, `ReportInterleave1`, `ReportInterleave2`. |
+| `WiimoteEmu/EmuSubroutines.cpp` | Input path: replaced `Common::FromLittleEndian(const u8*)` on `u8[2]` arrays (reads 4 bytes) with explicit `(addr[0] << 8) \| addr[1]` for address/size fields (protocol uses big-endian byte order per comment, explicit shift is endian-agnostic). Output path: `reply.address` changed from `Common::FromLittleEndian` (identity on LE, byteswap on BE) to `Common::ToBigEndian` (byteswap on LE, identity on BE). |
+| `WiimoteEmu/EmuSubroutines.cpp` | Added `buttons.hex = Common::ToLittleEndian(...)` before all 3 `TypedInputData` sends (Ack, Status, ReadDataReply) — `ButtonData` in packed structs stores hex in host byte order, but Wiimote HID protocol expects little-endian bytes. |
+| `WiimoteEmu/Extension/DesiredExtensionState.h` | `DefaultExtensionUpdate` template now byteswaps trailing u16 on BE for Classic, Guitar, Turntable (Shinkansen removed from check because `Shinkansen::DataFormat` is private and doesn't exist on BE). |
+| `USB/Bluetooth/WiimoteDevice.cpp` | `CBigEndianBuffer::Read16`/`Read32` changed from `Common::FromBigEndian(&m_buffer[offset])` (u32 pointer overload reads 4 bytes) to memcpy + value overload. `Write16`/`Write32` use `Common::ToBigEndian(T)` with memcpy. Fixes SDP data negotiation on LE (was reading 4 bytes instead of 2, corrupting service attribute lists). |
 
 ### MemoryInterface
 

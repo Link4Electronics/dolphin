@@ -6,6 +6,7 @@
 #include <variant>
 
 #include "Common/BitUtils.h"
+#include "Common/Swap.h"
 
 #include "Core/HW/WiimoteEmu/Extension/Classic.h"
 #include "Core/HW/WiimoteEmu/Extension/DrawsomeTablet.h"
@@ -69,5 +70,19 @@ void DefaultExtensionUpdate(EncryptedExtension::Register* reg,
   {
     Common::BitCastPtr<T>(&reg->controller_data) = T{};
   }
+
+  // Extension protocols use little-endian byte order for multi-byte fields.
+  // On big-endian hosts, swap the trailing u16 button field so the register
+  // bytes match what the PPC (which reads them as LE bytes) expects.
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  if constexpr (std::is_same_v<T, Classic::DataFormat> ||
+                std::is_same_v<T, Guitar::DataFormat> ||
+                std::is_same_v<T, Turntable::DataFormat>)
+  {
+    constexpr size_t offset = sizeof(T) - sizeof(u16);
+    u16* last_u16 = reinterpret_cast<u16*>(&reg->controller_data[offset]);
+    *last_u16 = Common::swap16(*last_u16);
+  }
+#endif
 }
 }  // namespace WiimoteEmu

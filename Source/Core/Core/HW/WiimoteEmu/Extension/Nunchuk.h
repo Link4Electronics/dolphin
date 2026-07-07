@@ -41,6 +41,13 @@ public:
 
     struct
     {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      u8 acc_z_lsb : 2;
+      u8 acc_y_lsb : 2;
+      u8 acc_x_lsb : 2;
+      u8 c : 1;
+      u8 z : 1;
+#else
       u8 z : 1;
       u8 c : 1;
 
@@ -48,6 +55,7 @@ public:
       u8 acc_x_lsb : 2;
       u8 acc_y_lsb : 2;
       u8 acc_z_lsb : 2;
+#endif
     };
   };
   static_assert(sizeof(ButtonFormat) == 1, "Wrong size");

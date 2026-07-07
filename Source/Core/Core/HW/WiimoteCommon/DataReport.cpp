@@ -5,6 +5,7 @@
 
 #include "Common/Assert.h"
 #include "Common/BitUtils.h"
+#include "Common/Swap.h"
 
 namespace WiimoteCommon
 {
@@ -34,7 +35,7 @@ struct IncludeCore : virtual DataReportManipulator
 
   void GetCoreData(CoreData* result) const override
   {
-    *result = Common::BitCastPtr<CoreData>(data_ptr);
+    result->hex = Common::FromLittleEndian(static_cast<u16>(Common::BitCastPtr<u16>(data_ptr)));
 
     // Remove accel LSBs.
     result->hex &= CoreData::BUTTON_MASK;
@@ -42,13 +43,14 @@ struct IncludeCore : virtual DataReportManipulator
 
   void SetCoreData(const CoreData& new_core) override
   {
-    CoreData core = Common::BitCastPtr<CoreData>(data_ptr);
+    CoreData core;
+    core.hex = Common::FromLittleEndian(static_cast<u16>(Common::BitCastPtr<u16>(data_ptr)));
 
     // Don't overwrite accel LSBs.
     core.hex &= ~CoreData::BUTTON_MASK;
     core.hex |= new_core.hex & CoreData::BUTTON_MASK;
 
-    Common::BitCastPtr<CoreData>(data_ptr) = core;
+    Common::BitCastPtr<u16>(data_ptr) = Common::ToLittleEndian(core.hex);
   }
 };
 
@@ -74,7 +76,8 @@ struct IncludeAccel : virtual DataReportManipulator
   void GetAccelData(AccelData* result) const override
   {
     const AccelMSB accel = Common::BitCastPtr<AccelMSB>(data_ptr + 2);
-    const CoreData core = Common::BitCastPtr<CoreData>(data_ptr);
+    CoreData core;
+    core.hex = Common::FromLittleEndian(static_cast<u16>(Common::BitCastPtr<u16>(data_ptr)));
 
     // X has 10 bits of precision.
     result->value.x = accel.x << 2;
@@ -92,11 +95,12 @@ struct IncludeAccel : virtual DataReportManipulator
     Common::BitCastPtr<AccelMSB>(data_ptr + 2) = AccelMSB(new_accel.value / 4);
 
     // LSBs
-    CoreData core = Common::BitCastPtr<CoreData>(data_ptr);
+    CoreData core;
+    core.hex = Common::FromLittleEndian(static_cast<u16>(Common::BitCastPtr<u16>(data_ptr)));
     core.acc_bits = (new_accel.value.x >> 0) & 0b11;
     core.acc_bits2 = (new_accel.value.y >> 1) & 0x1;
     core.acc_bits2 |= (new_accel.value.z & 0xb10);
-    Common::BitCastPtr<CoreData>(data_ptr) = core;
+    Common::BitCastPtr<u16>(data_ptr) = Common::ToLittleEndian(core.hex);
   }
 
   bool HasAccel() const override { return true; }
@@ -211,7 +215,8 @@ struct ReportInterleave1 : IncludeCore, IncludeIR<IRReportFormat::Full1, 3, 18, 
     accel->value.z &= 0b111111;
 
     // Report only contains 4 MSB of Z axis.
-    const CoreData core = Common::BitCastPtr<CoreData>(data_ptr);
+    CoreData core;
+    core.hex = Common::FromLittleEndian(static_cast<u16>(Common::BitCastPtr<u16>(data_ptr)));
     accel->value.z |= (core.acc_bits << 6) | (core.acc_bits2 << 8);
   }
 
@@ -219,10 +224,11 @@ struct ReportInterleave1 : IncludeCore, IncludeIR<IRReportFormat::Full1, 3, 18, 
   {
     data_ptr[2] = accel.value.x >> 2;
 
-    CoreData core = Common::BitCastPtr<CoreData>(data_ptr);
+    CoreData core;
+    core.hex = Common::FromLittleEndian(static_cast<u16>(Common::BitCastPtr<u16>(data_ptr)));
     core.acc_bits = (accel.value.z >> 6) & 0b11;
     core.acc_bits2 = (accel.value.z >> 8) & 0b11;
-    Common::BitCastPtr<CoreData>(data_ptr) = core;
+    Common::BitCastPtr<u16>(data_ptr) = Common::ToLittleEndian(core.hex);
   }
 
   bool HasAccel() const override { return true; }
@@ -244,7 +250,8 @@ struct ReportInterleave2 : IncludeCore, IncludeIR<IRReportFormat::Full2, 3, 18, 
     accel->value.z &= ~0b111111;
 
     // Report only contains 4 LSBs of Z axis. (converted to 6)
-    const CoreData core = Common::BitCastPtr<CoreData>(data_ptr);
+    CoreData core;
+    core.hex = Common::FromLittleEndian(static_cast<u16>(Common::BitCastPtr<u16>(data_ptr)));
     accel->value.z |= Common::ExpandValue<u16>(core.acc_bits | core.acc_bits2 << 2, 2);
   }
 
@@ -252,10 +259,11 @@ struct ReportInterleave2 : IncludeCore, IncludeIR<IRReportFormat::Full2, 3, 18, 
   {
     data_ptr[2] = accel.value.y >> 2;
 
-    CoreData core = Common::BitCastPtr<CoreData>(data_ptr);
+    CoreData core;
+    core.hex = Common::FromLittleEndian(static_cast<u16>(Common::BitCastPtr<u16>(data_ptr)));
     core.acc_bits = (accel.value.z >> 2) & 0b11;
     core.acc_bits2 = (accel.value.z >> 4) & 0b11;
-    Common::BitCastPtr<CoreData>(data_ptr) = core;
+    Common::BitCastPtr<u16>(data_ptr) = Common::ToLittleEndian(core.hex);
   }
 
   bool HasAccel() const override { return true; }

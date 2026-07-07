@@ -39,17 +39,26 @@ struct OutputReportRumble
 {
   static constexpr OutputReportID REPORT_ID = OutputReportID::Rumble;
 
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  u8 : 7;
   u8 rumble : 1;
+#else
+  u8 rumble : 1;
+#endif
 };
 static_assert(sizeof(OutputReportRumble) == 1, "Wrong size");
 
 struct OutputReportEnableFeature
 {
-  u8 rumble : 1;
-  // Respond with an ack.
-  u8 ack : 1;
-  // Enable/disable certain feature.
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
   u8 enable : 1;
+  u8 ack : 1;
+  u8 rumble : 1;
+#else
+  u8 rumble : 1;
+  u8 ack : 1;
+  u8 enable : 1;
+#endif
 };
 static_assert(sizeof(OutputReportEnableFeature) == 1, "Wrong size");
 
@@ -81,10 +90,17 @@ struct OutputReportLeds
 {
   static constexpr OutputReportID REPORT_ID = OutputReportID::LED;
 
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  u8 leds : 4;
+  u8 : 2;
+  u8 ack : 1;
+  u8 rumble : 1;
+#else
   u8 rumble : 1;
   u8 ack : 1;
   u8 : 2;
   u8 leds : 4;
+#endif
 };
 static_assert(sizeof(OutputReportLeds) == 1, "Wrong size");
 
@@ -92,10 +108,17 @@ struct OutputReportMode
 {
   static constexpr OutputReportID REPORT_ID = OutputReportID::ReportMode;
 
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  u8 : 5;
+  u8 continuous : 1;
+  u8 ack : 1;
+  u8 rumble : 1;
+#else
   u8 rumble : 1;
   u8 ack : 1;
   u8 continuous : 1;
   u8 : 5;
+#endif
   InputReportID mode;
 };
 static_assert(sizeof(OutputReportMode) == 2, "Wrong size");
@@ -104,15 +127,30 @@ struct OutputReportRequestStatus
 {
   static constexpr OutputReportID REPORT_ID = OutputReportID::RequestStatus;
 
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  u8 : 7;
+  u8 rumble : 1;
+#else
   u8 rumble : 1;
   u8 : 7;
+#endif
 };
 static_assert(sizeof(OutputReportRequestStatus) == 1, "Wrong size");
+
+
 
 struct OutputReportWriteData
 {
   static constexpr OutputReportID REPORT_ID = OutputReportID::WriteData;
 
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  u8 : 4;
+  u8 space : 2;
+  u8 : 1;
+  u8 rumble : 1;
+  u8 slave_address : 7;
+  u8 i2c_rw_ignored : 1;
+#else
   u8 rumble : 1;
   u8 : 1;
   u8 space : 2;
@@ -121,6 +159,7 @@ struct OutputReportWriteData
   u8 i2c_rw_ignored : 1;
   // Used only for register space (i2c bus) (7-bits):
   u8 slave_address : 7;
+#endif
   // big endian:
   u8 address[2];
   u8 size;
@@ -132,6 +171,14 @@ struct OutputReportReadData
 {
   static constexpr OutputReportID REPORT_ID = OutputReportID::ReadData;
 
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  u8 : 4;
+  u8 space : 2;
+  u8 : 1;
+  u8 rumble : 1;
+  u8 slave_address : 7;
+  u8 i2c_rw_ignored : 1;
+#else
   u8 rumble : 1;
   u8 : 1;
   u8 space : 2;
@@ -140,6 +187,7 @@ struct OutputReportReadData
   u8 i2c_rw_ignored : 1;
   // Used only for register space (i2c bus) (7-bits):
   u8 slave_address : 7;
+#endif
   // big endian:
   u8 address[2];
   u8 size[2];
@@ -151,9 +199,15 @@ struct OutputReportSpeakerData
   static constexpr OutputReportID REPORT_ID = OutputReportID::SpeakerData;
   static constexpr size_t DATA_SIZE = 20;
 
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  u8 length : 5;
+  u8 : 2;
+  u8 rumble : 1;
+#else
   u8 rumble : 1;
   u8 : 2;
   u8 length : 5;
+#endif
   std::array<u8, DATA_SIZE> data;
 };
 static_assert(sizeof(OutputReportSpeakerData) == 21, "Wrong size");
@@ -167,6 +221,23 @@ union ButtonData
 
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u8 home : 1;
+    u8 acc_bits2 : 2;
+    u8 minus : 1;
+    u8 a : 1;
+    u8 b : 1;
+    u8 one : 1;
+    u8 two : 1;
+
+    u8 unknown : 1;
+    u8 acc_bits : 2;
+    u8 plus : 1;
+    u8 up : 1;
+    u8 down : 1;
+    u8 right : 1;
+    u8 left : 1;
+#else
     u8 left : 1;
     u8 right : 1;
     u8 down : 1;
@@ -186,6 +257,7 @@ union ButtonData
     // For interleaved reports this is alternating bits of accel.z:
     u8 acc_bits2 : 2;
     u8 home : 1;
+#endif
   };
 };
 static_assert(sizeof(ButtonData) == 2, "Wrong size");
@@ -195,11 +267,19 @@ struct InputReportStatus
   static constexpr InputReportID REPORT_ID = InputReportID::Status;
 
   ButtonData buttons;
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  u8 leds : 4;
+  u8 ir : 1;
+  u8 speaker : 1;
+  u8 extension : 1;
+  u8 battery_low : 1;
+#else
   u8 battery_low : 1;
   u8 extension : 1;
   u8 speaker : 1;
   u8 ir : 1;
   u8 leds : 4;
+#endif
   u8 padding2[2];
   u8 battery;
 
@@ -236,8 +316,13 @@ struct InputReportReadDataReply
   static constexpr InputReportID REPORT_ID = InputReportID::ReadDataReply;
 
   ButtonData buttons;
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  u8 size_minus_one : 4;
+  u8 error : 4;
+#else
   u8 error : 4;
   u8 size_minus_one : 4;
+#endif
   // big endian:
   u16 address;
   u8 data[16];
@@ -281,10 +366,17 @@ struct AccelCalibrationPoint
   }
 
   u8 x2, y2, z2;
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  u8 : 2;
+  u8 x1 : 2;
+  u8 y1 : 2;
+  u8 z1 : 2;
+#else
   u8 z1 : 2;
   u8 y1 : 2;
   u8 x1 : 2;
   u8 : 2;
+#endif
 };
 
 // Located at 0x16 and 0x20 of Wii Remote EEPROM.
@@ -297,8 +389,13 @@ struct AccelCalibrationData
   AccelCalibrationPoint zero_g;
   AccelCalibrationPoint one_g;
 
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  u8 motor : 1;
+  u8 volume : 7;
+#else
   u8 volume : 7;
   u8 motor : 1;
+#endif
   u8 checksum;
 };
 

@@ -33,18 +33,28 @@ class CBigEndianBuffer
 public:
   explicit CBigEndianBuffer(u8* buffer) : m_buffer(buffer) {}
   u8 Read8(u32 offset) const { return m_buffer[offset]; }
-  u16 Read16(u32 offset) const { return Common::swap16(&m_buffer[offset]); }
-  u32 Read32(u32 offset) const { return Common::swap32(&m_buffer[offset]); }
+  u16 Read16(u32 offset) const
+  {
+    u16 val;
+    std::memcpy(&val, &m_buffer[offset], sizeof(u16));
+    return Common::FromBigEndian(val);
+  }
+  u32 Read32(u32 offset) const
+  {
+    u32 val;
+    std::memcpy(&val, &m_buffer[offset], sizeof(u32));
+    return Common::FromBigEndian(val);
+  }
   void Write8(u32 offset, u8 data) { m_buffer[offset] = data; }
   void Write16(u32 offset, u16 data)
   {
-    const u16 swapped = Common::swap16(data);
-    std::memcpy(&m_buffer[offset], &swapped, sizeof(u16));
+    const u16 be = Common::ToBigEndian(data);
+    std::memcpy(&m_buffer[offset], &be, sizeof(u16));
   }
   void Write32(u32 offset, u32 data)
   {
-    const u32 swapped = Common::swap32(data);
-    std::memcpy(&m_buffer[offset], &swapped, sizeof(u32));
+    const u32 be = Common::ToBigEndian(data);
+    std::memcpy(&m_buffer[offset], &be, sizeof(u32));
   }
   u8* GetPointer(u32 offset) { return &m_buffer[offset]; }
 

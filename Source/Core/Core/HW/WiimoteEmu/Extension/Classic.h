@@ -37,12 +37,31 @@ public:
 
     struct
     {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      u8 zl : 1;
+      u8 b : 1;
+      u8 y : 1;
+      u8 a : 1;
+      u8 x : 1;
+      u8 zr : 1;
+      u8 dpad_left : 1;
+      u8 dpad_up : 1;
+
+      u8 dpad_right : 1;
+      u8 dpad_down : 1;
+      u8 lt : 1;
+      u8 minus : 1;
+      u8 home : 1;
+      u8 plus : 1;
+      u8 rt : 1;
       u8 : 1;
-      u8 rt : 1;  // right trigger
+#else
+      u8 : 1;
+      u8 rt : 1;
       u8 plus : 1;
       u8 home : 1;
       u8 minus : 1;
-      u8 lt : 1;  // left trigger
+      u8 lt : 1;
       u8 dpad_down : 1;
       u8 dpad_right : 1;
 
@@ -53,7 +72,8 @@ public:
       u8 a : 1;
       u8 y : 1;
       u8 b : 1;
-      u8 zl : 1;  // left z button
+      u8 zl : 1;
+#endif
     };
   };
   static_assert(sizeof(ButtonFormat) == 2, "Wrong size");
@@ -112,6 +132,20 @@ public:
       bt.hex = ~value;
     }
 
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u8 rx3 : 2;
+    u8 lx : 6;  // byte 0
+
+    u8 rx2 : 2;
+    u8 ly : 6;  // byte 1
+
+    u8 rx1 : 1;
+    u8 lt2 : 2;
+    u8 ry : 5;
+
+    u8 lt1 : 3;
+    u8 rt : 5;
+#else
     u8 lx : 6;  // byte 0
     u8 rx3 : 2;
 
@@ -124,6 +158,7 @@ public:
 
     u8 rt : 5;
     u8 lt1 : 3;
+#endif
 
     ButtonFormat bt;  // byte 4, 5
   };

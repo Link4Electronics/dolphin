@@ -134,6 +134,7 @@ void Wiimote::SendAck(OutputReportID rpt_id, ErrorCode error_code)
   auto& ack = rpt.payload;
 
   ack.buttons = m_status.buttons;
+  ack.buttons.hex = Common::ToLittleEndian(ack.buttons.hex);
   ack.rpt_id = rpt_id;
   ack.error_code = error_code;
 
@@ -247,6 +248,7 @@ void Wiimote::HandleRequestStatus(const OutputReportRequestStatus&)
 
   TypedInputData<InputReportStatus> rpt(InputReportID::Status);
   rpt.payload = m_status;
+  rpt.payload.buttons.hex = Common::ToLittleEndian(rpt.payload.buttons.hex);
   InterruptDataInputCallback(rpt.GetData(), rpt.GetSize());
 }
 
@@ -259,7 +261,7 @@ void Wiimote::HandleWriteData(const OutputReportWriteData& wd)
     WARN_LOG_FMT(WIIMOTE, "WriteData: write during active read request.");
   }
 
-  const u16 address = Common::FromLittleEndian(wd.address);
+  const u16 address = (static_cast<u16>(wd.address[0]) << 8) | wd.address[1];
 
   DEBUG_LOG_FMT(WIIMOTE, "Wiimote::WriteData: {:#04x} @ {:#04x} @ {:#04x} ({})", wd.space,
                 wd.slave_address, address, wd.size);
@@ -414,9 +416,9 @@ void Wiimote::HandleReadData(const OutputReportReadData& rd)
   // Save the request and process it on the next "Update()" call(s)
   m_read_request.space = static_cast<AddressSpace>(rd.space);
   m_read_request.slave_address = rd.slave_address;
-  m_read_request.address = Common::FromLittleEndian(rd.address);
+  m_read_request.address = (static_cast<u16>(rd.address[0]) << 8) | rd.address[1];
   // A zero size request is just ignored, like on the real wiimote.
-  m_read_request.size = Common::FromLittleEndian(rd.size);
+  m_read_request.size = (static_cast<u16>(rd.size[0]) << 8) | rd.size[1];
 
   DEBUG_LOG_FMT(WIIMOTE, "Wiimote::ReadData: {} @ {:#04x} @ {:#04x} ({})",
                 static_cast<u8>(m_read_request.space), m_read_request.slave_address,
@@ -446,7 +448,8 @@ bool Wiimote::ProcessReadDataRequest()
   auto& reply = rpt.payload;
 
   reply.buttons = m_status.buttons;
-  reply.address = Common::FromLittleEndian(m_read_request.address);
+  reply.buttons.hex = Common::ToLittleEndian(reply.buttons.hex);
+  reply.address = Common::ToBigEndian(m_read_request.address);
 
   // Pre-fill with zeros in case of read-error or read < 16-bytes:
   std::ranges::fill(reply.data, 0x00);

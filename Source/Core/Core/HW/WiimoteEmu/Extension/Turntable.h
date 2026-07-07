@@ -32,6 +32,21 @@ class Turntable : public Extension1stParty
 public:
   struct DataFormat
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u8 rtable3 : 2;
+    u8 sx : 6;
+
+    u8 rtable2 : 2;
+    u8 sy : 6;
+
+    u8 rtable1 : 1;
+    u8 dial2 : 2;
+    u8 slider : 4;
+    u8 rtable4 : 1;
+
+    u8 dial1 : 3;
+    u8 ltable1 : 5;
+#else
     u8 sx : 6;
     u8 rtable3 : 2;
 
@@ -45,11 +60,21 @@ public:
 
     u8 ltable1 : 5;
     u8 dial1 : 3;
+#endif
 
     union
     {
-      u16 ltable2 : 1;
       u16 bt;  // buttons
+      struct
+      {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        u16 : 15;
+        u16 ltable2 : 1;
+#else
+        u16 ltable2 : 1;
+        u16 : 15;
+#endif
+      };
     };
   };
   static_assert(sizeof(DataFormat) == 6, "Wrong size");

@@ -43,8 +43,13 @@ public:
     // Y increases from bottom to top
     u8 stylus_x1;
     u8 stylus_y1;
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u8 stylus_y2 : 4;
+    u8 stylus_x2 : 4;
+#else
     u8 stylus_x2 : 4;
     u8 stylus_y2 : 4;
+#endif
 
     // Valid even when stylus is lifted
     u8 pressure;
