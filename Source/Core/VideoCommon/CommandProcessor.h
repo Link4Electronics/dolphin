@@ -106,12 +106,21 @@ union UCPStatusReg
 {
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 : 11;
+    u16 Breakpoint : 1;
+    u16 CommandIdle : 1;
+    u16 ReadIdle : 1;
+    u16 UnderflowLoWatermark : 1;
+    u16 OverflowHiWatermark : 1;
+#else
     u16 OverflowHiWatermark : 1;
     u16 UnderflowLoWatermark : 1;
     u16 ReadIdle : 1;
     u16 CommandIdle : 1;
     u16 Breakpoint : 1;
     u16 : 11;
+#endif
   };
   u16 Hex;
   UCPStatusReg() { Hex = 0; }
@@ -123,6 +132,15 @@ union UCPCtrlReg
 {
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 : 10;
+    u16 BPInt : 1;
+    u16 GPLinkEnable : 1;
+    u16 FifoUnderflowIntEnable : 1;
+    u16 FifoOverflowIntEnable : 1;
+    u16 BPEnable : 1;
+    u16 GPReadEnable : 1;
+#else
     u16 GPReadEnable : 1;
     u16 BPEnable : 1;
     u16 FifoOverflowIntEnable : 1;
@@ -130,6 +148,7 @@ union UCPCtrlReg
     u16 GPLinkEnable : 1;
     u16 BPInt : 1;
     u16 : 10;
+#endif
   };
   u16 Hex;
   UCPCtrlReg() { Hex = 0; }
@@ -141,11 +160,18 @@ union UCPClearReg
 {
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 : 13;
+    u16 ClearMetrics : 1;
+    u16 ClearFifoUnderflow : 1;
+    u16 ClearFifoOverflow : 1;
+#else
     u16 ClearFifoOverflow : 1;
     u16 ClearFifoUnderflow : 1;
     // set by GXClearGPMetric
     u16 ClearMetrics : 1;
     u16 : 13;
+#endif
   };
   u16 Hex;
   UCPClearReg() { Hex = 0; }
