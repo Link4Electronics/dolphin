@@ -46,10 +46,10 @@ void WC24FriendList::WriteFriendList() const
 bool WC24FriendList::CheckFriendList() const
 {
   // 'WcFl' magic
-  if (Common::swap32(m_data.header.magic) != FRIEND_LIST_MAGIC)
+  if (Common::FromBigEndian(m_data.header.magic) != FRIEND_LIST_MAGIC)
   {
     ERROR_LOG_FMT(IOS_WC24, "Receive List magic mismatch ({} != {})",
-                  Common::swap32(m_data.header.magic), FRIEND_LIST_MAGIC);
+                  Common::FromBigEndian(m_data.header.magic), FRIEND_LIST_MAGIC);
     return false;
   }
 
@@ -67,11 +67,11 @@ std::vector<u64> WC24FriendList::GetUnconfirmedFriends() const
   std::vector<u64> friends{};
   for (u32 i = 0; i < MAX_ENTRIES; i++)
   {
-    if (static_cast<FriendStatus>(Common::swap32(m_data.entries[i].status)) ==
+    if (static_cast<FriendStatus>(Common::FromBigEndian(m_data.entries[i].status)) ==
             FriendStatus::Unconfirmed &&
-        static_cast<FriendType>(Common::swap32(m_data.entries[i].friend_type)) == FriendType::Wii)
+        static_cast<FriendType>(Common::FromBigEndian(m_data.entries[i].friend_type)) == FriendType::Wii)
     {
-      friends.push_back(Common::swap64(m_data.friend_codes.at(i)));
+      friends.push_back(Common::FromBigEndian(m_data.friend_codes.at(i)));
     }
   }
 

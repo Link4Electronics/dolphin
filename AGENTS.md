@@ -271,6 +271,22 @@ All Wiimote-related bitfield structs are now fixed.
 | `IOSC.cpp:512,514,516` | `Common::swap32` → `Common::ToBigEndian` for `MakeBlankEccCert` fields (signature.type, header.public_key_type, header.id) — struct is serialized to BE format for the emulated PPC. |
 | `IOSC.cpp:645-648` | `Common::swap32(dump.*)` → `Common::FromBigEndian(dump.*)` in `LoadEntries()` — `BootMiiKeyDump` fields are BE on disk. |
 
+### Core/IOS/Network/KD (NWC24/WC24 - Magic mismatch errors)
+
+| File | Change |
+|------|--------|
+| `NWC24Config.cpp` | All 15 `Common::swap32`/`swap64` → `Common::FromBigEndian`/`ToBigEndian` (magic, version, id_generation, checksum, creation_stage, enable_booting, nwc24_id) |
+| `NWC24DL.cpp` | All 21 `Common::swapNN` → `Common::FromBigEndian`/`ToBigEndian` (subtask_bitmask, title_ids, flags, timestamps, magic, version) |
+| `Mail/WC24Send.cpp` | All 18 `Common::swap32` → `Common::FromBigEndian`/`ToBigEndian` (magic, version, number_of_mail, entry ids/sizes, timestamps) |
+| `Mail/WC24FriendList.cpp` | All 5 `Common::swapNN` → `Common::FromBigEndian`/`ToBigEndian` (magic, status, friend_type, friend_code) |
+| `Mail/MailCommon.h` | `Common::swap32(128 + (index * 128))` → `Common::ToBigEndian<u32>(128 + (index * 128))` (header size array) |
+
+**Root cause:** `Common::swap32()` unconditionally reverses bytes. NAND file data uses BE for integer fields. On BE host, the raw file bytes are already in the correct host order after `ReadBytes(&struct, ...)`, so `swap32` corrupts them. This causes `Magic mismatch` errors during IOS boot on BE for both IOS 50 and IOS 24, leading to `WC24Mail unavailable` / `WC24Download unavailable` messages. The errors appear twice in the boot log (once per IOS reload).
+
+**Diagnosis (log comparison):** On a working x86_64 LE system, these magic errors do NOT occur because `swap32` on LE converts the file-BE bytes into correct host-LE values. On BE, magic 0x5753007C (expected by `SEND_LIST_MAGIC`) gets `swap32`'d to 0x7C005357, causing mismatch 1716806487 != 1466127462.
+
+**Note:** Existing NAND dumps created on LE systems may have WC24 file data stored in LE order. The NAND `Read()` stores raw bytes into structs; if the dump was created on LE, the WC24 file bytes may be in LE format. Fixing the code to use `FromBigEndian` means WC24 files from LE dumps will also fail because the bytes are already LE (not BE). This is the same problem as SYSCONF — must format the NAND data correctly for the host endianness.
+
 ## How To Test
 
 1. **Build** with `-DENABLE_GENERIC=ON` on the PPC64 BE machine

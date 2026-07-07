@@ -68,7 +68,7 @@ bool WC24SendList::ReadSendList()
     if (!next_entry_index)
     {
       // If there are no free entries, we will have to overwrite an entry.
-      m_data.header.next_entry_offset = Common::swap32(128);
+      m_data.header.next_entry_offset = Common::ToBigEndian<u32>(128);
     }
     else
     {
@@ -102,14 +102,14 @@ void WC24SendList::WriteSendList() const
 bool WC24SendList::CheckSendList() const
 {
   // 'WcTf' magic
-  if (Common::swap32(m_data.header.magic) != MAIL_LIST_MAGIC)
+  if (Common::FromBigEndian(m_data.header.magic) != MAIL_LIST_MAGIC)
   {
     ERROR_LOG_FMT(IOS_WC24, "Send List magic mismatch ({} != {})",
-                  Common::swap32(m_data.header.magic), MAIL_LIST_MAGIC);
+                  Common::FromBigEndian(m_data.header.magic), MAIL_LIST_MAGIC);
     return false;
   }
 
-  if (Common::swap32(m_data.header.version) != 4)
+  if (Common::FromBigEndian(m_data.header.version) != 4)
   {
     ERROR_LOG_FMT(IOS_WC24, "Send List version mismatch");
     return false;
@@ -121,19 +121,19 @@ bool WC24SendList::CheckSendList() const
 u32 WC24SendList::GetNumberOfMail() const
 {
   ASSERT(!IsDisabled());
-  return Common::swap32(m_data.header.number_of_mail);
+  return Common::FromBigEndian(m_data.header.number_of_mail);
 }
 
 u32 WC24SendList::GetEntryId(u32 entry_index) const
 {
   ASSERT(!IsDisabled());
-  return Common::swap32(m_data.entries[entry_index].id);
+  return Common::FromBigEndian(m_data.entries[entry_index].id);
 }
 
 u32 WC24SendList::GetMailSize(u32 index) const
 {
   ASSERT(!IsDisabled());
-  return Common::swap32(m_data.entries[index].msg_size);
+  return Common::FromBigEndian(m_data.entries[index].msg_size);
 }
 
 ErrorCode WC24SendList::DeleteMessage(u32 index)
@@ -144,11 +144,11 @@ ErrorCode WC24SendList::DeleteMessage(u32 index)
     return error;
 
   // Fix up the header then clear the entry.
-  m_data.header.number_of_mail = Common::swap32(Common::swap32(m_data.header.number_of_mail) - 1);
-  m_data.header.next_entry_id = Common::swap32(GetEntryId(index));
+  m_data.header.number_of_mail = Common::ToBigEndian(Common::FromBigEndian(m_data.header.number_of_mail) - 1);
+  m_data.header.next_entry_id = Common::ToBigEndian(GetEntryId(index));
   m_data.header.next_entry_offset = CalculateFileOffset(index);
   m_data.header.total_size_of_messages =
-      Common::swap32(m_data.header.total_size_of_messages) - GetMailSize(index);
+      Common::FromBigEndian(m_data.header.total_size_of_messages) - GetMailSize(index);
 
   std::memset(&m_data.entries[index], 0, sizeof(MailListEntry));
   return WC24_OK;
@@ -162,13 +162,13 @@ std::string WC24SendList::GetMailPath(u32 index) const
 u32 WC24SendList::GetNextEntryId() const
 {
   ASSERT(!IsDisabled());
-  return Common::swap32(m_data.header.next_entry_id);
+  return Common::FromBigEndian(m_data.header.next_entry_id);
 }
 
 u32 WC24SendList::GetNextEntryIndex() const
 {
   ASSERT(!IsDisabled());
-  return (Common::swap32(m_data.header.next_entry_offset) - 128) / 128;
+  return (Common::FromBigEndian(m_data.header.next_entry_offset) - 128) / 128;
 }
 
 std::vector<u32> WC24SendList::GetMailToSend() const
@@ -217,7 +217,7 @@ ErrorCode WC24SendList::AddRegistrationMessages(const WC24FriendList& friend_lis
   {
     const u32 entry_index = GetNextEntryIndex();
     const u32 msg_id = GetNextEntryId();
-    m_data.entries[entry_index].id = Common::swap32(msg_id);
+    m_data.entries[entry_index].id = Common::ToBigEndian(msg_id);
 
     const std::time_t t = std::time(nullptr);
 
@@ -236,17 +236,17 @@ ErrorCode WC24SendList::AddRegistrationMessages(const WC24FriendList& friend_lis
     NOTICE_LOG_FMT(IOS_WC24, "Issued registration message for Wii Friend: {}", code);
 
     // Update the header and some fields in the body
-    m_data.entries[entry_index].msg_size = Common::swap32(static_cast<u32>(message.size()));
-    m_data.header.number_of_mail = Common::swap32(GetNumberOfMail() + 1);
-    m_data.header.next_entry_id = Common::swap32(msg_id + 1);
+    m_data.entries[entry_index].msg_size = Common::ToBigEndian(static_cast<u32>(message.size()));
+    m_data.header.number_of_mail = Common::ToBigEndian(GetNumberOfMail() + 1);
+    m_data.header.next_entry_id = Common::ToBigEndian(msg_id + 1);
     m_data.header.total_size_of_messages =
-        Common::swap32(m_data.header.total_size_of_messages) + static_cast<u32>(message.size());
+        Common::FromBigEndian(m_data.header.total_size_of_messages) + static_cast<u32>(message.size());
 
     const std::optional<u32> next_entry_index = GetNextFreeEntryIndex();
     if (!next_entry_index)
     {
       // If there are no free entries, we overwrite the first entry.
-      m_data.header.next_entry_offset = Common::swap32(128);
+      m_data.header.next_entry_offset = Common::ToBigEndian<u32>(128);
     }
     else
     {

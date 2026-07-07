@@ -92,7 +92,7 @@ u32 NWC24Config::CalculateNwc24ConfigChecksum() const
 
   for (int i = 0; i < 0xFF; ++i)
   {
-    sum += Common::swap32(*ptr++);
+    sum += Common::FromBigEndian(*ptr++);
   }
 
   return sum;
@@ -129,32 +129,32 @@ s32 NWC24Config::CheckNwc24Config() const
 
 u32 NWC24Config::Magic() const
 {
-  return Common::swap32(m_data.magic);
+  return Common::FromBigEndian(m_data.magic);
 }
 
 void NWC24Config::SetMagic(u32 magic)
 {
-  m_data.magic = Common::swap32(magic);
+  m_data.magic = Common::ToBigEndian(magic);
 }
 
 u32 NWC24Config::Version() const
 {
-  return Common::swap32(m_data.version);
+  return Common::FromBigEndian(m_data.version);
 }
 
 void NWC24Config::SetVersion(u32 version)
 {
-  m_data.version = Common::swap32(version);
+  m_data.version = Common::ToBigEndian(version);
 }
 
 u32 NWC24Config::IdGen() const
 {
-  return Common::swap32(m_data.id_generation);
+  return Common::FromBigEndian(m_data.id_generation);
 }
 
 void NWC24Config::SetIdGen(u32 id_generation)
 {
-  m_data.id_generation = Common::swap32(id_generation);
+  m_data.id_generation = Common::ToBigEndian(id_generation);
 }
 
 void NWC24Config::IncrementIdGen()
@@ -168,42 +168,42 @@ void NWC24Config::IncrementIdGen()
 
 u32 NWC24Config::Checksum() const
 {
-  return Common::swap32(m_data.checksum);
+  return Common::FromBigEndian(m_data.checksum);
 }
 
 void NWC24Config::SetChecksum(u32 checksum)
 {
-  m_data.checksum = Common::swap32(checksum);
+  m_data.checksum = Common::ToBigEndian(checksum);
 }
 
 NWC24CreationStage NWC24Config::CreationStage() const
 {
-  return NWC24CreationStage(Common::swap32(u32(m_data.creation_stage)));
+  return NWC24CreationStage(Common::FromBigEndian(u32(m_data.creation_stage)));
 }
 
 void NWC24Config::SetCreationStage(NWC24CreationStage creation_stage)
 {
-  m_data.creation_stage = NWC24CreationStage(Common::swap32(u32(creation_stage)));
+  m_data.creation_stage = NWC24CreationStage(Common::ToBigEndian(u32(creation_stage)));
 }
 
 u32 NWC24Config::EnableBooting() const
 {
-  return Common::swap32(m_data.enable_booting);
+  return Common::FromBigEndian(m_data.enable_booting);
 }
 
 void NWC24Config::SetEnableBooting(u32 enable_booting)
 {
-  m_data.enable_booting = Common::swap32(enable_booting);
+  m_data.enable_booting = Common::ToBigEndian(enable_booting);
 }
 
 u64 NWC24Config::Id() const
 {
-  return Common::swap64(m_data.nwc24_id);
+  return Common::FromBigEndian(m_data.nwc24_id);
 }
 
 void NWC24Config::SetId(u64 nwc24_id)
 {
-  m_data.nwc24_id = Common::swap64(nwc24_id);
+  m_data.nwc24_id = Common::ToBigEndian(nwc24_id);
 }
 
 const char* NWC24Config::Email() const
