@@ -894,15 +894,17 @@ ReturnCode ESCore::CheckStreamKeyPermissions(const u32 uid, const u8* ticket_vie
   if (title_flags & ES::TITLE_TYPE_WFS_MAYBE && uid != PID_UNKNOWN)
     return ES_EINVAL;
 
-  const u64 view_title_id = Common::swap64(ticket_view + offsetof(ES::TicketView, title_id));
+  u64 view_title_id_val;
+  std::memcpy(&view_title_id_val, ticket_view + offsetof(ES::TicketView, title_id), sizeof(u64));
+  const u64 view_title_id = Common::FromBigEndian(view_title_id_val);
   if (view_title_id != tmd.GetTitleId())
     return ES_EINVAL;
 
   // More permission checks.
   const u32 permitted_title_mask =
-      Common::swap32(ticket_view + offsetof(ES::TicketView, permitted_title_mask));
+      Common::FromBigEndian(ticket_view + offsetof(ES::TicketView, permitted_title_mask));
   const u32 permitted_title_id =
-      Common::swap32(ticket_view + offsetof(ES::TicketView, permitted_title_id));
+      Common::FromBigEndian(ticket_view + offsetof(ES::TicketView, permitted_title_id));
   if ((uid == PID_UNKNOWN && (~permitted_title_mask & 0x13) != permitted_title_id) ||
       !IsActiveTitlePermittedByTicket(ticket_view))
   {
@@ -922,8 +924,11 @@ ReturnCode ESCore::SetUpStreamKey(const u32 uid, const u8* ticket_view, const ES
   // TODO (for the future): signature checks.
 
   // Find a signed ticket from the view.
-  const u64 ticket_id = Common::swap64(&ticket_view[offsetof(ES::TicketView, ticket_id)]);
-  const u64 title_id = Common::swap64(&ticket_view[offsetof(ES::TicketView, title_id)]);
+  u64 ticket_id_val, title_id_val;
+  std::memcpy(&ticket_id_val, &ticket_view[offsetof(ES::TicketView, ticket_id)], sizeof(u64));
+  std::memcpy(&title_id_val, &ticket_view[offsetof(ES::TicketView, title_id)], sizeof(u64));
+  const u64 ticket_id = Common::FromBigEndian(ticket_id_val);
+  const u64 title_id = Common::FromBigEndian(title_id_val);
   const ES::TicketReader installed_ticket = FindSignedTicket(title_id);
   // Unlike the other "get ticket from view" function, this returns a FS error, not ES_NO_TICKET.
   if (!installed_ticket.IsValid())
@@ -1011,9 +1016,9 @@ bool ESCore::IsActiveTitlePermittedByTicket(const u8* ticket_view) const
 
   const u32 title_identifier = static_cast<u32>(m_title_context.tmd.GetTitleId());
   const u32 permitted_title_mask =
-      Common::swap32(ticket_view + offsetof(ES::TicketView, permitted_title_mask));
+      Common::FromBigEndian(ticket_view + offsetof(ES::TicketView, permitted_title_mask));
   const u32 permitted_title_id =
-      Common::swap32(ticket_view + offsetof(ES::TicketView, permitted_title_id));
+      Common::FromBigEndian(ticket_view + offsetof(ES::TicketView, permitted_title_id));
   return title_identifier && (title_identifier & ~permitted_title_mask) == permitted_title_id;
 }
 

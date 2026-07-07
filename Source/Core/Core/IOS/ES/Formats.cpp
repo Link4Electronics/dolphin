@@ -125,7 +125,7 @@ bool SignedBlobReader::IsSignatureValid() const
 
 SignatureType SignedBlobReader::GetSignatureType() const
 {
-  return static_cast<SignatureType>(Common::swap32(m_bytes.data()));
+  return static_cast<SignatureType>(Common::FromBigEndian(m_bytes.data()));
 }
 
 template <typename T, typename It>
@@ -245,32 +245,42 @@ std::vector<u8> TMDReader::GetRawView() const
 
 u16 TMDReader::GetBootIndex() const
 {
-  return Common::swap16(m_bytes.data() + offsetof(TMDHeader, boot_index));
+  u16 value;
+  std::memcpy(&value, m_bytes.data() + offsetof(TMDHeader, boot_index), sizeof(u16));
+  return Common::FromBigEndian(value);
 }
 
 u64 TMDReader::GetIOSId() const
 {
-  return Common::swap64(m_bytes.data() + offsetof(TMDHeader, ios_id));
+  u64 value;
+  std::memcpy(&value, m_bytes.data() + offsetof(TMDHeader, ios_id), sizeof(u64));
+  return Common::FromBigEndian(value);
 }
 
 u64 TMDReader::GetTitleId() const
 {
-  return Common::swap64(m_bytes.data() + offsetof(TMDHeader, title_id));
+  u64 value;
+  std::memcpy(&value, m_bytes.data() + offsetof(TMDHeader, title_id), sizeof(u64));
+  return Common::FromBigEndian(value);
 }
 
 u32 TMDReader::GetTitleFlags() const
 {
-  return Common::swap32(m_bytes.data() + offsetof(TMDHeader, title_flags));
+  return Common::FromBigEndian(m_bytes.data() + offsetof(TMDHeader, title_flags));
 }
 
 u16 TMDReader::GetTitleVersion() const
 {
-  return Common::swap16(m_bytes.data() + offsetof(TMDHeader, title_version));
+  u16 value;
+  std::memcpy(&value, m_bytes.data() + offsetof(TMDHeader, title_version), sizeof(u16));
+  return Common::FromBigEndian(value);
 }
 
 u16 TMDReader::GetGroupId() const
 {
-  return Common::swap16(m_bytes.data() + offsetof(TMDHeader, group_id));
+  u16 value;
+  std::memcpy(&value, m_bytes.data() + offsetof(TMDHeader, group_id), sizeof(u16));
+  return Common::FromBigEndian(value);
 }
 
 DiscIO::Region TMDReader::GetRegion() const
@@ -281,8 +291,9 @@ DiscIO::Region TMDReader::GetRegion() const
   if (GetTitleId() == Titles::SYSTEM_MENU)
     return DiscIO::GetSysMenuRegion(GetTitleVersion());
 
-  const DiscIO::Region region =
-      static_cast<DiscIO::Region>(Common::swap16(m_bytes.data() + offsetof(TMDHeader, region)));
+  u16 region_value;
+  std::memcpy(&region_value, m_bytes.data() + offsetof(TMDHeader, region), sizeof(u16));
+  const DiscIO::Region region = static_cast<DiscIO::Region>(Common::FromBigEndian(region_value));
 
   return region <= DiscIO::Region::NTSC_K ? region : DiscIO::Region::Unknown;
 }
@@ -317,7 +328,9 @@ std::string TMDReader::GetGameTDBID() const
 
 u16 TMDReader::GetNumContents() const
 {
-  return Common::swap16(m_bytes.data() + offsetof(TMDHeader, num_contents));
+  u16 value;
+  std::memcpy(&value, m_bytes.data() + offsetof(TMDHeader, num_contents), sizeof(u16));
+  return Common::FromBigEndian(value);
 }
 
 bool TMDReader::GetContent(u16 index, Content* content) const
@@ -328,10 +341,22 @@ bool TMDReader::GetContent(u16 index, Content* content) const
   }
 
   const u8* content_base = m_bytes.data() + sizeof(TMDHeader) + index * sizeof(Content);
-  content->id = Common::swap32(content_base + offsetof(Content, id));
-  content->index = Common::swap16(content_base + offsetof(Content, index));
-  content->type = Common::swap16(content_base + offsetof(Content, type));
-  content->size = Common::swap64(content_base + offsetof(Content, size));
+  content->id = Common::FromBigEndian(content_base + offsetof(Content, id));
+  {
+    u16 index_val;
+    std::memcpy(&index_val, content_base + offsetof(Content, index), sizeof(u16));
+    content->index = Common::FromBigEndian(index_val);
+  }
+  {
+    u16 type_val;
+    std::memcpy(&type_val, content_base + offsetof(Content, type), sizeof(u16));
+    content->type = Common::FromBigEndian(type_val);
+  }
+  {
+    u64 size_val;
+    std::memcpy(&size_val, content_base + offsetof(Content, size), sizeof(u64));
+    content->size = Common::FromBigEndian(size_val);
+  }
   std::copy_n(content_base + offsetof(Content, sha1), content->sha1.size(), content->sha1.begin());
 
   return true;
@@ -394,8 +419,8 @@ u32 TicketReader::GetTicketSize() const
 {
   if (IsV1Ticket())
   {
-    return Common::swap32(m_bytes.data() + sizeof(Ticket) +
-                          offsetof(V1TicketHeader, v1_ticket_size)) +
+    return Common::FromBigEndian(m_bytes.data() + sizeof(Ticket) +
+                                  offsetof(V1TicketHeader, v1_ticket_size)) +
            sizeof(Ticket);
   }
 
@@ -407,7 +432,9 @@ std::vector<u8> TicketReader::GetRawTicket(u64 ticket_id_to_find) const
   for (size_t i = 0; i < GetNumberOfTickets(); ++i)
   {
     const auto ticket_begin = m_bytes.begin() + GetTicketSize() * i;
-    const u64 ticket_id = Common::swap64(&*ticket_begin + offsetof(ES::Ticket, ticket_id));
+    u64 ticket_id_val;
+    std::memcpy(&ticket_id_val, &*ticket_begin + offsetof(ES::Ticket, ticket_id), sizeof(u64));
+    const u64 ticket_id = Common::FromBigEndian(ticket_id_val);
     if (ticket_id == ticket_id_to_find)
       return {ticket_begin, ticket_begin + GetTicketSize()};
   }
@@ -437,12 +464,14 @@ u8 TicketReader::GetVersion() const
 
 u32 TicketReader::GetDeviceId() const
 {
-  return Common::swap32(m_bytes.data() + offsetof(Ticket, device_id));
+  return Common::FromBigEndian(m_bytes.data() + offsetof(Ticket, device_id));
 }
 
 u64 TicketReader::GetTitleId() const
 {
-  return Common::swap64(m_bytes.data() + offsetof(Ticket, title_id));
+  u64 value;
+  std::memcpy(&value, m_bytes.data() + offsetof(Ticket, title_id), sizeof(u64));
+  return Common::FromBigEndian(value);
 }
 
 u8 TicketReader::GetCommonKeyIndex() const
@@ -488,7 +517,9 @@ void TicketReader::DeleteTicket(u64 ticket_id_to_delete)
   for (size_t i = 0; i < num_tickets; ++i)
   {
     const auto ticket_start = m_bytes.cbegin() + GetTicketSize() * i;
-    const u64 ticket_id = Common::swap64(&*ticket_start + offsetof(Ticket, ticket_id));
+    u64 ticket_id_val;
+    std::memcpy(&ticket_id_val, &*ticket_start + offsetof(Ticket, ticket_id), sizeof(u64));
+    const u64 ticket_id = Common::FromBigEndian(ticket_id_val);
     if (ticket_id != ticket_id_to_delete)
       new_ticket.insert(new_ticket.end(), ticket_start, ticket_start + GetTicketSize());
   }
@@ -641,7 +672,7 @@ static std::pair<u32, u64> ReadUidSysEntry(HLE::FSCore& fs, u64 fd, u64* ticks)
   if (fs.Read(fd, &uid, 1, ticks) != sizeof(uid))
     return {};
 
-  return {Common::swap32(uid), Common::swap64(title_id)};
+  return {Common::FromBigEndian(uid), Common::FromBigEndian(title_id)};
 }
 
 constexpr char UID_MAP_PATH[] = "/sys/uid.sys";
@@ -693,8 +724,8 @@ u32 UIDSys::GetOrInsertUIDForTitle(const u64 title_id)
   m_entries.insert({uid, title_id});
 
   // Byte swap before writing.
-  const u64 swapped_title_id = Common::swap64(title_id);
-  const u32 swapped_uid = Common::swap32(uid);
+  const u64 swapped_title_id = Common::ToBigEndian(title_id);
+  const u32 swapped_uid = Common::ToBigEndian(uid);
 
   constexpr HLE::FS::Modes modes{HLE::FS::Mode::ReadWrite, HLE::FS::Mode::ReadWrite,
                                  HLE::FS::Mode::None};
@@ -742,7 +773,7 @@ bool CertReader::IsValid() const
 u32 CertReader::GetId() const
 {
   const size_t offset = GetSignatureSize() + offsetof(CertHeader, id);
-  return Common::swap32(m_bytes.data() + offset);
+  return Common::FromBigEndian(m_bytes.data() + offset);
 }
 
 std::string CertReader::GetName() const
@@ -755,7 +786,7 @@ std::string CertReader::GetName() const
 PublicKeyType CertReader::GetPublicKeyType() const
 {
   const size_t offset = GetSignatureSize() + offsetof(CertHeader, public_key_type);
-  return static_cast<PublicKeyType>(Common::swap32(m_bytes.data() + offset));
+  return static_cast<PublicKeyType>(Common::FromBigEndian(m_bytes.data() + offset));
 }
 
 template <typename T, typename It>

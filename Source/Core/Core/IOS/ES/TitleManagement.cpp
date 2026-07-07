@@ -575,7 +575,9 @@ IPCReply ESDevice::DeleteTitle(const IOCtlVRequest& request)
 ReturnCode ESCore::DeleteTicket(const u8* ticket_view)
 {
   const auto fs = m_ios.GetFS();
-  const u64 title_id = Common::swap64(ticket_view + offsetof(ES::TicketView, title_id));
+  u64 title_id_val;
+  std::memcpy(&title_id_val, ticket_view + offsetof(ES::TicketView, title_id), sizeof(u64));
+  const u64 title_id = Common::FromBigEndian(title_id_val);
 
   if (!CanDeleteTitle(title_id))
     return ES_EINVAL;
@@ -588,7 +590,9 @@ ReturnCode ESCore::DeleteTicket(const u8* ticket_view)
   const std::string ticket_path =
       was_v1_ticket ? Common::GetV1TicketFileName(title_id) : Common::GetTicketFileName(title_id);
 
-  const u64 ticket_id = Common::swap64(ticket_view + offsetof(ES::TicketView, ticket_id));
+  u64 ticket_id_val;
+  std::memcpy(&ticket_id_val, ticket_view + offsetof(ES::TicketView, ticket_id), sizeof(u64));
+  const u64 ticket_id = Common::FromBigEndian(ticket_id_val);
   ticket.DeleteTicket(ticket_id);
 
   const std::vector<u8>& new_ticket = ticket.GetBytes();

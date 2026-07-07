@@ -67,7 +67,7 @@ The new conditional functions use `std::endian::native` (C++20) to only swap whe
 | **TGC** | LE (0xA2380FAE) | BE (fst_real_offset, etc.) | — |
 | **WIA/RVZ** | LE ("WIA\x1", "RVZ\x1") | BE (version, sizes, offsets) | — |
 | **NFS** | LE ("EGGS") | BE (lba_range_count, blocks) | — |
-| **WAD** | ? (0x00204973 / 0x00206962) | ? | — |
+| **WAD** | LE (0x00204973 / 0x00206962) | BE (hdr_size, wad_type, cert_size, ticket_size, tmd_size, data_size, bnr_size) | — |
 
 ## Modified Files
 
@@ -186,7 +186,6 @@ Wiimote unions are not needed for GC-only use (Swiss on a GameCube).
 | `OGLTexture.cpp:357-369` | **Removed** byteswap from `OGLTexture::Load` — data is now already in `[R,G,B,A]` byte order from the decoder. Avoids double-swapping custom/OSD textures from image files. |
 | `SWOGLWindow.cpp:93-101` | `SWOGLWindow::ShowImage`: added conditional byteswap on BE for XFB display — converts native u32 byte order to GL_RGBA byte order before `glTexImage2D` upload. |
 | `PulseAudioStream.cpp:88` | `PA_SAMPLE_S16LE` → `PA_SAMPLE_S16NE` (BE host was telling PulseAudio that BE sample data is LE — caused static noise on all audio output). |
-| `VertexLoader.cpp:26` | `PosMtx_ReadDirect_UByte`: `DataWrite<u32>(posmtx)` → `DataWrite<u32>(ToLittleEndian(posmtx))`. On BE, u32 write stored `[0, 0, 0, value]` but SW renderer reads byte 0 getting 0 → every vertex uses matrix index 0 → wrong bones → spiky/lying-down 3D geometry. Fix writes LE byte order `[value, 0, 0, 0]` on all hosts. |
 
 ### SW EFB Interface (color inversion fix)
 
@@ -225,10 +224,27 @@ Wiimote unions are not needed for GC-only use (Swiss on a GameCube).
 | `ElfReader.cpp:198-206` | Symbol table reads → `FromBigEndian` |
 | `ElfReader.cpp:239-240` | HID4 pattern → `FromBigEndian` |
 
+### Core/IOS/ES (WAD/TMD/Ticket/Cert)
+
+| File | Change |
+|------|--------|
+| `Formats.cpp` | All `Common::swapNN(ptr)` → `Common::FromBigEndian`/`ToBigEndian` (~25 locations). Fixes TMD header fields (boot_index, ios_id, title_id, title_flags, title_version, group_id, region, num_contents), content table fields (id, index, type, size), Ticket fields (device_id, title_id), V1 ticket size, V1TicketHeader fields, Cert fields (id, public_key_type), `ReadUidSysEntry` (NAND read path), and `GetOrInsertUIDForTitle` (NAND write path via `ToBigEndian`). |
+| `Views.cpp` | `swap64`/`swap32` on TicketView → `FromBigEndian` (GetTicketFromView: 4 occurrences for title_id, ticket_id, permitted_title_mask, permitted_title_id) |
+| `TitleManagement.cpp` | `swap64` on TicketView → `FromBigEndian` (DeleteTicket: title_id, ticket_id) |
+| `ES.cpp` | `swap64`/`swap32` on TicketView → `FromBigEndian` (CheckStreamKeyPermissions: 3 occurrences; SetUpStreamKey: 2 occurrences; IsActiveTitlePermittedByTicket: 2 occurrences) |
+
+### Core/IOS (IOSC - RSA exponent fix)
+
+| File | Change |
+|------|--------|
+| `IOSC.cpp:586,600` | `Common::swap32(0x00010001)` → `Common::ToBigEndian(0x00010001)` — RSA exponent stored in `m_root_key_entry.misc_data` (read as raw BE bytes by mbedTLS). On BE, `swap32` stored bytes `[0x01,0x00,0x01,0x00]` → mbedTLS read exponent as `0x01000100=16777472` instead of `65537`, breaking ALL RSA signature verification. |
+| `IOSC.cpp:512,514,516` | `Common::swap32` → `Common::ToBigEndian` for `MakeBlankEccCert` fields (signature.type, header.public_key_type, header.id) — struct is serialized to BE format for the emulated PPC. |
+| `IOSC.cpp:645-648` | `Common::swap32(dump.*)` → `Common::FromBigEndian(dump.*)` in `LoadEntries()` — `BootMiiKeyDump` fields are BE on disk. |
+
 ## How To Test
 
 1. **Build** with `-DENABLE_GENERIC=ON` on the PPC64 BE machine
-2. **Game detection**: Place an ISO/wbfs/gcz in the configured game path and launch dolphin. If games appear in the list, blob detection works.
+2. **Game detection**: Place an ISO/wbfs/gcz/wad in the configured game path and launch dolphin. If games appear in the list, blob detection works.
 3. **Interpreter**: Boot a game with interpreter CPU core selected (Config → Advanced → CPU Core → Interpreter).
 4. **Debug**: Run with `LOG_*` categories in the config or use the `--debugger` flag.
 
@@ -243,9 +259,11 @@ Wiimote unions are not needed for GC-only use (Swiss on a GameCube).
 
 ### 2. VertexLoader posmtx Byte Order (Opaque Matrix / Vertex Blast fix)
 
-**Root cause:** `VertexLoader::PosMtx_ReadDirect_UByte` wrote `DataWrite<u32>(posmtx)`. On BE, the u32 store placed the value in the 4th byte (MSB) but both SW renderer and OGL backend read byte 0 (via `Read<u8, false>` or `GL_UNSIGNED_BYTE` × 4 vertex fetch), getting 0. Every vertex used matrix index 0 → identity bind pose → spiky/lying-down geometry in Luigi's Mansion, Mario Kart: Double Dash, and similar complex 3D renders. Simple models (IPL logo, F-Zero GX) were unaffected because they don't set per-vertex `PosMatIdx`.
+**Status:** REVERTED — commit 96f09ce2e3 was reverted by bf7dcbc31b (broke OGL, Mario 3D chest regression). See Pending Fix #2 below.
 
-**Fix:** `DataWrite<u32>(Common::ToLittleEndian(static_cast<u32>(posmtx)))` — always writes bytes `[value, 0, 0, 0]` regardless of host endianness. Occurs in `Source/Core/VideoCommon/VertexLoader.cpp:26`.
+**Root cause:** `VertexLoader::PosMtx_ReadDirect_UByte` wrote `DataWrite<u32>(posmtx)`. On BE, the u32 store placed the value in the 4th byte (MSB). The SW renderer reads byte 0 (`ReadVertexAttribute<u8>(..., base_component=0)`), getting 0 → every vertex uses matrix index 0 → identity bind pose → spiky geometry.
+
+**Why the revert:** OGL backend uses `glBufferSubData` for vertex buffer upload, and Mesa on PPC64 BE byteswaps the u32 data during `glBufferSubData` (confirmed at OGLStreamBuffer.cpp:308-309), turning `[0, 0, 0, value]` back to `[value, 0, 0, 0]`. So the original `DataWrite<u32>(posmtx)` is correct for OGL. The fix belongs only on the SW reader side (`SWVertexLoader.cpp`).
 
 ## Known Remaining Issues
 
@@ -267,21 +285,23 @@ The GPU texture decode compute shaders (`TextureConversionShader.cpp`) are endia
 
 On BE, Mesa on UMA reads buffer data as-is (no byteswap on unmap), but `MapAndSync`/`MapAndOrphan` use `glMapBufferRange` + `glUnmapBuffer` which Mesa handles correctly for the scalar/struct UBO data — the persistent buffer avoidance alone is sufficient for UBO correctness.
 
-### 3. OGL Vertex Blast (3D Models Only)
+### 2. SW Vertex Blast — Pending Fix (SW Reader Side Only)
 
-**Status:** FIXED (VertexLoader posmtx byte order, see #2 in Fixed section)
+**Symptom:** GC IPL logo renders correctly (simple textured quad). Luigi's Mansion 3D models on SW renderer have spiky vertex blast.
 
-**Symptom:** GC IPL logo renders perfectly (simple textured quad, 4 vertices, 6 indices). Luigi's Mansion 3D models have vertex blast (spiky geometry).
+**Root cause:** `VertexLoader::PosMtx_ReadDirect_UByte` writes `DataWrite<u32>(posmtx)` — on BE this stores `[0, 0, 0, value]`. The SW renderer in `SWVertexLoader.cpp:244` reads byte 0 via `ReadVertexAttribute<u8>(..., base_component=0)`, getting 0 for every matrix index.
 
-**Root cause:** `VertexLoader::PosMtx_ReadDirect_UByte` wrote `DataWrite<u32>(posmtx)`. On BE, the u32 store placed the value in the 4th byte (MSB) but the SW renderer reads byte 0, getting 0 → every vertex uses matrix index 0 → identity bind pose → spiky/lying-down geometry.
+**Pending fix:** Change `base_component` from 0 to 3 on BE in `SWVertexLoader.cpp:244`. Do NOT modify `VertexLoader.cpp` because OGL backend relies on Mesa byteswapping during `glBufferSubData` (see OGLStreamBuffer.cpp:308-309 comment).
 
-F-Zero GX and IPL work because they don't set `PosMatIdx` in the vertex descriptor — their position matrix comes from `MatrixIndexA.PosNormalMtxIdx` (XF state), not from per-vertex data.
+### 3. SW Renderer Color Inversion
 
-**Why OGL was affected too:** Mesa on PPC64 BE does NOT byteswap `GL_ARRAY_BUFFER` data during `glBufferSubData`. The vertex buffer contains BE byte-order u32 values that are read byte-by-byte by the OGL vertex fetch. The `[0, 0, 0, value]` byte layout puts `value` in the last byte regardless of Mesa involvement.
+**Symptom:** Colors appear inverted / have blue tint on SW renderer. The `ReadU32LE` fix in SWEfbInterface.cpp (blend factors) is already in place but didn't resolve the issue. Root cause still unknown.
 
-**Fix:** `DataWrite<u32>(Common::ToLittleEndian(static_cast<u32>(posmtx)))` in `PosMtx_ReadDirect_UByte` — always writes bytes `[value, 0, 0, 0]` regardless of host endianness. Both SW (reads byte 0) and OGL (reads byte 0 via GL_UNSIGNED_BYTE × 4) see the correct value.
+### 4. OGL Flag Animation
 
-### 4. Vulkan Renderer
+**Symptom:** MKDD checkerboard flag is static/flat on BE, while it waves correctly on x86_64. Suspected UBO/attribute endian issue specific to the OGL backend.
+
+### 5. Vulkan Renderer
 Not needed for R600 (OpenGL only scenario), but the Vulkan backend may have endian assumptions.
 
 ## Architectural Notes for Future JIT Port

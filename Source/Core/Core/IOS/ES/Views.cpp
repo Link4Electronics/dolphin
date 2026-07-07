@@ -107,8 +107,11 @@ IPCReply ESDevice::GetTicketViews(const IOCtlVRequest& request)
 ReturnCode ESCore::GetTicketFromView(const u8* ticket_view, u8* ticket, u32* ticket_size,
                                      std::optional<u8> desired_version) const
 {
-  const u64 title_id = Common::swap64(&ticket_view[offsetof(ES::TicketView, title_id)]);
-  const u64 ticket_id = Common::swap64(&ticket_view[offsetof(ES::TicketView, ticket_id)]);
+  u64 title_id_val, ticket_id_val;
+  std::memcpy(&title_id_val, &ticket_view[offsetof(ES::TicketView, title_id)], sizeof(u64));
+  std::memcpy(&ticket_id_val, &ticket_view[offsetof(ES::TicketView, ticket_id)], sizeof(u64));
+  const u64 title_id = Common::FromBigEndian(title_id_val);
+  const u64 ticket_id = Common::FromBigEndian(ticket_id_val);
   const u8 view_version = ticket_view[offsetof(ES::TicketView, version)];
   const u8 version = desired_version.value_or(view_version);
 
@@ -134,9 +137,9 @@ ReturnCode ESCore::GetTicketFromView(const u8* ticket_view, u8* ticket, u32* tic
   // Check for permission to export the ticket.
   const u32 title_identifier = static_cast<u32>(m_title_context.tmd.GetTitleId());
   const u32 permitted_title_mask =
-      Common::swap32(ticket_bytes.data() + offsetof(ES::Ticket, permitted_title_mask));
+      Common::FromBigEndian(ticket_bytes.data() + offsetof(ES::Ticket, permitted_title_mask));
   const u32 permitted_title_id =
-      Common::swap32(ticket_bytes.data() + offsetof(ES::Ticket, permitted_title_id));
+      Common::FromBigEndian(ticket_bytes.data() + offsetof(ES::Ticket, permitted_title_id));
   const u8 title_export_allowed = ticket_bytes[offsetof(ES::Ticket, title_export_allowed)];
 
   // This is the check present in IOS. The 5 does not correspond to any known constant, sadly.

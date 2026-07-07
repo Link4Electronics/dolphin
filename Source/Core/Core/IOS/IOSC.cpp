@@ -509,11 +509,11 @@ static CertECC MakeBlankEccCert(const std::string& issuer, const std::string& na
                                 const u8* private_key, u32 key_id)
 {
   CertECC cert{};
-  cert.signature.type = SignatureType(Common::swap32(u32(SignatureType::ECC)));
+  cert.signature.type = SignatureType(Common::ToBigEndian(u32(SignatureType::ECC)));
   issuer.copy(cert.signature.issuer, sizeof(cert.signature.issuer) - 1);
-  cert.header.public_key_type = PublicKeyType(Common::swap32(u32(PublicKeyType::ECC)));
+  cert.header.public_key_type = PublicKeyType(Common::ToBigEndian(u32(PublicKeyType::ECC)));
   name.copy(cert.header.name, sizeof(cert.header.name) - 1);
-  cert.header.id = Common::swap32(key_id);
+  cert.header.id = Common::ToBigEndian(key_id);
   cert.public_key = Common::ec::PrivToPub(private_key);
   return cert;
 }
@@ -583,7 +583,7 @@ void IOSC::LoadDefaultEntries()
                                         3};
     m_root_key_entry = {TYPE_PUBLIC_KEY, ObjectSubType::RSA4096,
                         std::vector<u8>(ROOT_PUBLIC_KEY.begin(), ROOT_PUBLIC_KEY.end()),
-                        Common::swap32(0x00010001), 0};
+                        Common::ToBigEndian(0x00010001), 0};
     // Retail keyblob are issued by CA00000001. Default to 1 even though IOSC actually defaults
     // to 2.
     m_ms_id = 2;
@@ -597,7 +597,7 @@ void IOSC::LoadDefaultEntries()
                                         3};
     m_root_key_entry = {TYPE_PUBLIC_KEY, ObjectSubType::RSA4096,
                         std::vector<u8>(ROOT_PUBLIC_KEY_DEV.begin(), ROOT_PUBLIC_KEY_DEV.end()),
-                        Common::swap32(0x00010001), 0};
+                        Common::ToBigEndian(0x00010001), 0};
     m_ms_id = 3;
     m_ca_id = 2;
     break;
@@ -642,10 +642,10 @@ void IOSC::LoadEntries()
 
   m_key_entries[HANDLE_CONSOLE_KEY].data = {dump.ng_priv.begin(), dump.ng_priv.end()};
   m_console_signature = dump.ng_sig;
-  m_ms_id = Common::swap32(dump.ms_id);
-  m_ca_id = Common::swap32(dump.ca_id);
-  m_console_key_id = Common::swap32(dump.ng_key_id);
-  m_key_entries[HANDLE_CONSOLE_ID].misc_data = Common::swap32(dump.ng_id);
+  m_ms_id = Common::FromBigEndian(dump.ms_id);
+  m_ca_id = Common::FromBigEndian(dump.ca_id);
+  m_console_key_id = Common::FromBigEndian(dump.ng_key_id);
+  m_key_entries[HANDLE_CONSOLE_ID].misc_data = Common::FromBigEndian(dump.ng_id);
   m_key_entries[HANDLE_FS_KEY].data = {dump.nand_key.begin(), dump.nand_key.end()};
   m_key_entries[HANDLE_FS_MAC].data = {dump.nand_hmac.begin(), dump.nand_hmac.end()};
   m_key_entries[HANDLE_PRNG_KEY].data = {dump.backup_key.begin(), dump.backup_key.end()};
