@@ -271,6 +271,69 @@ All Wiimote-related bitfield structs are now fixed.
 | `IOSC.cpp:512,514,516` | `Common::swap32` → `Common::ToBigEndian` for `MakeBlankEccCert` fields (signature.type, header.public_key_type, header.id) — struct is serialized to BE format for the emulated PPC. |
 | `IOSC.cpp:645-648` | `Common::swap32(dump.*)` → `Common::FromBigEndian(dump.*)` in `LoadEntries()` — `BootMiiKeyDump` fields are BE on disk. |
 
+### Core/IOS/USB/Bluetooth (BT HCI Endian Fixes)
+
+**Root cause:** Bluetooth HCI protocol defines all multi-byte fields (opcodes, connection handles, packet types, clock offsets, etc.) in **little-endian** byte order. The PPC stores LE data in memory and reads it back with `lhbrx`/`lwbrx` (byte-reversed loads). On a BE host, `CopyFromEmu`/`CopyToEmu` (which use raw `memcpy`) interpret LE bytes as BE values, corrupting all HCI communication.
+
+#### Input path (HCI command reading — `BTEmu.cpp`)
+
+All HCI command structs read via `CopyFromEmu` have multi-byte fields in LE byte order in PPC memory. On BE host, these need `Common::FromLittleEndian()` after copy.
+
+| Location | Field | Fix |
+|----------|-------|-----|
+| `ExecuteHCICommandMessage:977` | `msg.Opcode` | `FromLittleEndian` — determines command dispatch switch |
+| `CommandDisconnect:1231` | `disconnect.con_handle` | `FromLittleEndian` — passed to `AccessWiimote` + `SendEventDisconnect` |
+| `CommandChangeConPacketType:1332-1333` | `change_packet_type.con_handle`, `pkt_type` | `FromLittleEndian` — passed to `SendEventConPacketTypeChange` |
+| `CommandAuthenticationRequested:1351` | `auth_req.con_handle` | `FromLittleEndian` — passed to `SendEventAuthenticationCompleted` |
+| `CommandReadRemoteFeatures:1386` | `read_remote_features.con_handle` | `FromLittleEndian` — passed to `SendEventReadRemoteFeatures` |
+| `CommandReadRemoteVerInfo:1401` | `read_remote_ver_info.con_handle` | `FromLittleEndian` — passed to `SendEventReadRemoteVerInfo` |
+| `CommandReadClockOffset:1416` | `read_clock_offset.con_handle` | `FromLittleEndian` — passed to `SendEventReadClockOffsetComplete` |
+| `CommandSniffMode:1431-1432` | `sniff_mode.con_handle`, `max_interval` | `FromLittleEndian` — passed to `SendEventModeChange` |
+| `CommandWriteLinkSupervisionTimeout:1680-1681` | `supervision.con_handle`, `timeout` | `FromLittleEndian` — used in reply + logging |
+
+#### Output path (HCI event writing — `BTEmu.cpp`)
+
+All HCI event/reply structs written to the SQueuedEvent buffer end up in PPC memory via `FillBuffer` → `CopyToEmu`. Multi-byte fields must be stored in **little-endian** byte order because the PPC reads them with `lhbrx`/`lwbrx`. On BE host, `Common::ToLittleEndian()` byteswaps before store.
+
+| Function | Fields Fixed |
+|----------|-------------|
+| `SendEventCommandComplete:732` | `hci_event->Opcode` |
+| `SendEventCommandStatus:755` | `hci_event->Opcode` |
+| `SendEventConnectionComplete:526` | `Connection_Handle` |
+| `SendEventDisconnect:599` | `Connection_Handle` |
+| `SendEventAuthenticationCompleted:624` | `Connection_Handle` |
+| `SendEventReadRemoteFeatures:676` | `ConnectionHandle` |
+| `SendEventReadRemoteVerInfo:705-708` | `ConnectionHandle`, `manufacturer`, `lmp_subversion` |
+| `SendEventModeChange:848-850` | `Connection_Handle`, `Value` |
+| `SendEventReadClockOffsetComplete:928-929` | `ConnectionHandle`, `ClockOffset` |
+| `SendEventConPacketTypeChange:954-955` | `ConnectionHandle`, `PacketType` |
+| `SendEventInquiryResponse:501` | `clock_offset` |
+| `SendEventNumberOfCompletedPackets:814-815` | `compl_pkts`, `con_handle` |
+
+#### ACL header path (`BTEmu.cpp`)
+
+ACL data packets have a 4-byte header (`hci_acldata_hdr_t`) with two u16 fields (`con_handle` and `length`). These are LE in PPC memory, just like HCI events and commands.
+
+| Location | Direction | Fields Fixed |
+|----------|-----------|-------------|
+| `IOCtlV ACL_DATA_OUT:160-168` | Input (read) | `con_handle`, `length` via `FromLittleEndian` |
+| `SendACLPacket:244-245` | Output (write) | `con_handle`, `length` via `ToLittleEndian` |
+| `ACLPool::WriteToEndpoint:438-439` | Output (write) | `con_handle`, `length` via `ToLittleEndian` |
+
+#### Reply struct passthrough (command handlers — `BTEmu.cpp`)
+
+| Command | Struct | Fields Fixed |
+|---------|--------|-------------|
+| `CommandReadStoredLinkKey` | `hci_read_stored_link_key_rp` | `max_num_keys`, `num_keys_read` |
+| `CommandDeleteStoredLinkKey` | `hci_delete_stored_link_key_rp` | `num_keys_deleted` |
+| `CommandWriteLinkSupervisionTimeout` | `hci_write_link_supervision_timeout_rp` | `con_handle` |
+| `CommandReadLocalVer` | `hci_read_local_ver_rp` | `hci_revision`, `manufacturer`, `lmp_subversion` |
+| `CommandReadBufferSize` | `hci_read_buffer_size_rp` | `max_acl_size`, `num_acl_pkts`, `num_sco_pkts` |
+
+**Impact without fix:** All HCI commands hit the `default` case in the switch statement (opcode corrupted), or reach the correct handler but with wrong connection handles (wrong wiimote targeted, events lost). Wii Remote pairing/communication completely broken on BE.
+
+**Note:** `USBV0.cpp`'s `swap16` usage was investigated by agent #1 and is **correct** — it reads LE data from a pointer cast and converts to host BE. No change needed there. SYSCONF parsing was investigated by agent #2 and confirmed **correct** after the existing `FromBigEndian` fix.
+
 ### InputCommon/XInput2 (Mouse buttons not registering on BE)
 
 | File | Change |
@@ -279,7 +342,19 @@ All Wiimote-related bitfield structs are now fixed.
 
 **Root cause:** X11's `XIButtonState.mask` is an `unsigned char*` byte array where bit 0 of byte 0 = button 1. The code used `memcpy` to pack this into a `u64`, which on BE placed byte 0 in the highest byte (MSB). The right-shift by 1 (for 1→0 index conversion) then pushed all meaningful bits out of the `u32` range, effectively making every mouse button appear released. This broke all mouse-click-based wiimote input (e.g., default A="Click 1", B="Click 3" mappings on X11).
 
-### Core/IOS/Network/KD (NWC24/WC24 - Magic mismatch errors)
+#### WiimoteDevice.cpp (L2CAP Endian Fix - Wiimote Connect/Disconnect Loop)
+
+**Root cause:** All L2CAP protocol fields (dcid, scid, psm, length, result, status, flags) are in **little-endian** on the wire. WiimoteDevice.cpp uses packed struct pointer casts (`l2cap_hdr_t*`, `l2cap_con_req_cp*`, etc.) from raw `u8*` buffers. On BE host, reading the raw LE bytes as `uint16_t` via struct member access interprets them as BE, corrupting ALL L2CAP signaling. Every L2CAP connection request, response, configuration, and disconnection was broken.
+
+**Fix:** Wrapped every u16 field access at the buffer boundary:
+- **Input path** (buffer → host): `Common::FromLittleEndian(struct->field)` after pointer cast
+- **Output path** (host → buffer): `Common::ToLittleEndian(val)` before struct field assignment
+
+Functions fixed: `ExecuteL2capCmd`, `SignalChannel`, `ReceiveConnectionReq`, `ReceiveConnectionResponse`, `ReceiveConfigurationReq`, `ReceiveConfigurationResponse`, `ReceiveDisconnectionReq`, `SendConnectionRequest`, `SendConfigurationRequest`, `SDPSendServiceSearchResponse`, `SDPSendServiceAttributeResponse`, `SendCommandToACL`, `InterruptDataInputCallback`.
+
+**Impact without fix:** All 7 L2CAP command types (connect req/rsp, config req/rsp, disconnect req/rsp, command reject) were broken on BE. The `ReceiveConnectionReq` handler would read PSM=0x1100 (byteswapped from 0x0011=HID_CNTL) → `FindChannelWithPSM` returned the wrong channel → disconnect. This caused the observed connect/disconnect loop every ~4 seconds.
+
+## Core/IOS/Network/KD (NWC24/WC24 - Magic mismatch errors)
 
 | File | Change |
 |------|--------|
@@ -304,7 +379,10 @@ All Wiimote-related bitfield structs are now fixed.
 
 ## Fixed
 
-### 1. TimeBase Read/Write (IPL boot hang fix)
+### 1. L2CAP Protocol Endian (Wiimote Connect/Disconnect Loop)
+`WiimoteDevice.cpp` — All L2CAP protocol fields (dcid, scid, psm, length, result, status, flags) are LE on the wire but the code uses packed struct pointer casts from raw buffers. On BE host, every u16 field access was byteswapped, breaking ALL L2CAP signaling. Fixed by wrapping every input u16 access with `Common::FromLittleEndian()` and every output u16 access with `Common::ToLittleEndian()`.
+
+### 2. TimeBase Read/Write (IPL boot hang fix)
 `PowerPC.cpp:399-408` — `ReadFullTimeBaseValue()`/`WriteFullTimeBaseValue()` used `std::memcpy` to read/write `spr[SPR_TL..SPR_TU]` as a u64. On BE, `memcpy` interprets the pair in host byte order (big-endian), so `spr[SPR_TL]` (at the lower address) becomes the upper 32 bits instead of the lower. This corrupted the Time Base value returned to the IPL's `__OSGetSystemTime()` (`mftb` → `mfspr` → `ReadFullTimeBaseValue()`), causing the timer expiry check in DvdStep state 2 to never pass. The IPL hung forever at `PI_RESET_CODE: 00000001` without ever sending DI commands.
 
 **Fix:** Replaced `memcpy` with explicit shifts:
