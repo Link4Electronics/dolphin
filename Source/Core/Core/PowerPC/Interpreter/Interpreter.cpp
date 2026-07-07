@@ -129,19 +129,6 @@ int Interpreter::SingleStepInner()
   m_ppc_state.npc = m_ppc_state.pc + sizeof(UGeckoInstruction);
   m_prev_inst.hex = m_mmu.Read_Opcode(m_ppc_state.pc);
 
-  // DEBUG: Log every execution at the hang PC 0x801e0864 (Luigi's Mansion on PPC64 BE)
-  if (m_ppc_state.pc == 0x801e0864)
-  {
-    ERROR_LOG_FMT(POWERPC,
-                  "HANG_PC: PC={:08x} inst={:08x} LR={:08x} r3={:08x} r4={:08x} r5={:08x} "
-                  "r6={:08x} r7={:08x} r8={:08x} CR={:08x} MSR={:08x} TB={:016x}",
-                  m_ppc_state.pc, m_prev_inst.hex, m_ppc_state.spr[SPR_LR],
-                  m_ppc_state.gpr[3], m_ppc_state.gpr[4], m_ppc_state.gpr[5],
-                  m_ppc_state.gpr[6], m_ppc_state.gpr[7], m_ppc_state.gpr[8],
-                  m_ppc_state.cr.Get(), m_ppc_state.msr.Hex,
-                  m_system.GetPowerPC().ReadFullTimeBaseValue());
-  }
-
   const GekkoOPInfo* opinfo = PPCTables::GetOpInfo(m_prev_inst, m_ppc_state.pc);
 
   // Uncomment to trace the interpreter

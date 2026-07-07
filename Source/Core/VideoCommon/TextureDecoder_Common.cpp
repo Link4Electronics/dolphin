@@ -735,10 +735,16 @@ void TexDecoder_DecodeXFB(u8* dst, const u8* src, u32 width, u32 height, u32 str
       u8 G2 = static_cast<u8>(std::clamp(int(1.164f * Y2 - 0.392f * U - 0.813f * V), 0, 255));
       u8 B2 = static_cast<u8>(std::clamp(int(1.164f * Y2 + 2.017f * U), 0, 255));
 
-      u32 rgba = 0xff000000 | B1 << 16 | G1 << 8 | R1;
+      u32 rgba = (static_cast<u32>(R1) << 0) | (static_cast<u32>(G1) << 8) |
+                 (static_cast<u32>(B1) << 16) | (0xffu << 24);
+      if constexpr (std::endian::native == std::endian::big)
+        rgba = Common::swap32(rgba);
       std::memcpy(dst_ptr, &rgba, sizeof(rgba));
       dst_ptr += sizeof(rgba);
-      rgba = 0xff000000 | B2 << 16 | G2 << 8 | R2;
+      rgba = (static_cast<u32>(R2) << 0) | (static_cast<u32>(G2) << 8) |
+             (static_cast<u32>(B2) << 16) | (0xffu << 24);
+      if constexpr (std::endian::native == std::endian::big)
+        rgba = Common::swap32(rgba);
       std::memcpy(dst_ptr, &rgba, sizeof(rgba));
       dst_ptr += sizeof(rgba);
     }
