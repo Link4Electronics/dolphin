@@ -3,12 +3,15 @@
 
 #include "VideoBackends/Software/SWOGLWindow.h"
 
+#include <bit>
 #include <memory>
+#include <vector>
 
 #include "Common/GL/GLContext.h"
 #include "Common/GL/GLUtil.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
+#include "Common/Swap.h"
 
 #include "VideoBackends/Software/SWTexture.h"
 
@@ -103,9 +106,23 @@ void SWOGLWindow::ShowImage(const AbstractTexture* image,
   glPixelStorei(GL_UNPACK_ALIGNMENT, 4);  // 4-byte pixel alignment
   glPixelStorei(GL_UNPACK_ROW_LENGTH, sw_image->GetConfig().width);
 
+  const u8* image_data = sw_image->GetData(0, 0);
+  std::vector<u8> swapped_copy;
+  if constexpr (std::endian::native == std::endian::big)
+  {
+    const size_t image_size = static_cast<size_t>(sw_image->GetConfig().width) *
+                              static_cast<size_t>(sw_image->GetConfig().height) * sizeof(u32);
+    swapped_copy.assign(image_data, image_data + image_size);
+    u32* pixels = reinterpret_cast<u32*>(swapped_copy.data());
+    const size_t count = image_size / sizeof(u32);
+    for (size_t i = 0; i < count; i++)
+      pixels[i] = Common::swap32(pixels[i]);
+    image_data = swapped_copy.data();
+  }
+
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, static_cast<GLsizei>(sw_image->GetConfig().width),
                static_cast<GLsizei>(sw_image->GetConfig().height), 0, GL_RGBA, GL_UNSIGNED_BYTE,
-               sw_image->GetData(0, 0));
+               image_data);
 
   glUseProgram(m_image_program);
 

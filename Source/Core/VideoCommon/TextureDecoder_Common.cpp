@@ -305,13 +305,6 @@ void TexDecoder_Decode(u8* dst, const u8* src, int width, int height, TextureFor
 
   if (TexFmt_Overlay_Enable)
     TexDecoder_DrawOverlay(dst, width, height, texformat);
-
-  if constexpr (std::endian::native == std::endian::big)
-  {
-    u32* pixels = reinterpret_cast<u32*>(dst);
-    for (int i = 0; i < width * height; i++)
-      pixels[i] = Common::swap32(pixels[i]);
-  }
 }
 
 static inline u32 DecodePixel_IA8(u16 val)
@@ -737,14 +730,10 @@ void TexDecoder_DecodeXFB(u8* dst, const u8* src, u32 width, u32 height, u32 str
 
       u32 rgba = (static_cast<u32>(R1) << 0) | (static_cast<u32>(G1) << 8) |
                  (static_cast<u32>(B1) << 16) | (0xffu << 24);
-      if constexpr (std::endian::native == std::endian::big)
-        rgba = Common::swap32(rgba);
       std::memcpy(dst_ptr, &rgba, sizeof(rgba));
       dst_ptr += sizeof(rgba);
       rgba = (static_cast<u32>(R2) << 0) | (static_cast<u32>(G2) << 8) |
              (static_cast<u32>(B2) << 16) | (0xffu << 24);
-      if constexpr (std::endian::native == std::endian::big)
-        rgba = Common::swap32(rgba);
       std::memcpy(dst_ptr, &rgba, sizeof(rgba));
       dst_ptr += sizeof(rgba);
     }

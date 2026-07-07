@@ -85,7 +85,7 @@ bool PulseAudio::PulseInit()
   pa_channel_map* channel_map_p = nullptr;  // auto channel map
   if (m_stereo)
   {
-    ss.format = PA_SAMPLE_S16LE;
+    ss.format = PA_SAMPLE_S16NE;
     m_bytespersample = sizeof(s16);
   }
   else

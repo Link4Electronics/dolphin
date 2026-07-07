@@ -3,10 +3,14 @@
 
 #include "VideoBackends/OGL/OGLTexture.h"
 
+#include <bit>
+#include <vector>
+
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
 #include "Common/GL/GLUtil.h"
 #include "Common/MsgHandler.h"
+#include "Common/Swap.h"
 
 #include "VideoBackends/OGL/OGLConfig.h"
 #include "VideoBackends/OGL/OGLGfx.h"
@@ -350,6 +354,20 @@ void OGLTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8
   }
   else
   {
+    const u8* upload_buffer = buffer;
+    std::vector<u8> swapped_buffer;
+    if constexpr (std::endian::native == std::endian::big)
+    {
+      if (m_config.format == AbstractTextureFormat::RGBA8)
+      {
+        swapped_buffer.assign(buffer, buffer + buffer_size);
+        u32* pixels = reinterpret_cast<u32*>(swapped_buffer.data());
+        for (size_t i = 0; i < buffer_size / sizeof(u32); i++)
+          pixels[i] = Common::swap32(pixels[i]);
+        upload_buffer = swapped_buffer.data();
+      }
+    }
+
     GLenum gl_format = GetGLFormatForTextureFormat(m_config.format);
     GLenum gl_type = GetGLTypeForTextureFormat(m_config.format);
     if (m_config.type == AbstractTextureType::Texture_CubeMap)
@@ -357,36 +375,37 @@ void OGLTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8
       if (g_ogl_config.bSupportsTextureStorage)
       {
         glTexSubImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + layer, level, 0, 0, width, height,
-                        gl_format, gl_type, buffer);
+                        gl_format, gl_type, upload_buffer);
       }
       else
       {
         glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + layer, level, gl_internal_format, width,
-                     height, 0, gl_format, gl_type, buffer);
+                     height, 0, gl_format, gl_type, upload_buffer);
       }
     }
     else if (m_config.type == AbstractTextureType::Texture_2D)
     {
       if (g_ogl_config.bSupportsTextureStorage)
       {
-        glTexSubImage2D(target, level, 0, 0, width, height, gl_format, gl_type, buffer);
+        glTexSubImage2D(target, level, 0, 0, width, height, gl_format, gl_type, upload_buffer);
       }
       else
       {
         glTexImage2D(target, level, gl_internal_format, width, height, 0, gl_format, gl_type,
-                     buffer);
+                     upload_buffer);
       }
     }
     else if (m_config.type == AbstractTextureType::Texture_2DArray)
     {
       if (g_ogl_config.bSupportsTextureStorage)
       {
-        glTexSubImage3D(target, level, 0, 0, layer, width, height, 1, gl_format, gl_type, buffer);
+        glTexSubImage3D(target, level, 0, 0, layer, width, height, 1, gl_format, gl_type,
+                        upload_buffer);
       }
       else
       {
         glTexImage3D(target, level, gl_internal_format, width, height, 1, 0, gl_format, gl_type,
-                     buffer);
+                     upload_buffer);
       }
     }
     else

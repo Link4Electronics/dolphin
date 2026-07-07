@@ -178,7 +178,11 @@ Wiimote unions are not needed for GC-only use (Swiss on a GameCube).
 | `ColorUtil.cpp:42-45` | `Decode5A3` output: added `if constexpr` endian-aware byte order — produces `[B,G,R,A]` memory bytes on both hosts for `.rgbSwapped()` compatibility. |
 | `ColorUtil.cpp:58` | `Decode5A3Image`: `Common::swap16(src[ix])` → `Common::FromBigEndian(src[ix])` — fix for raw BE byte buffer cast to `u16*`. |
 | `ColorUtil.cpp:78` | `DecodeCI8Image`: same `swap16` → `FromBigEndian` fix for palette lookups. |
-| `TextureDecoder_Common.cpp:309-314` | `TexDecoder_Decode`: added conditional byteswap pass on BE — converts decoded u32 pixels from host byte order `[A,B,G,R]` to OpenGL `[R,G,B,A]` byte order. |
+| `TextureDecoder_Common.cpp:309-314` | `TexDecoder_Decode`: **removed** conditional byteswap pass on BE (was converting decoded u32 pixels from host `[A,B,G,R]` to `[R,G,B,A]`, but this broke SW renderer which reads u32 via bitshift ops). Byteswap moved to `OGLTexture::Load` at GL upload boundary. |
+| `TextureDecoder_Common.cpp:738-748` | `TexDecoder_DecodeXFB`: **removed** conditional byteswap (was redundant once OGLTexture::Load handles it). |
+| `OGLTexture.cpp:357-369` | `OGLTexture::Load`: added conditional byteswap on BE for uncompressed RGBA8 textures — converts native u32 byte order to GL_RGBA byte order before `glTexSubImage2D`/`glTexImage2D`. |
+| `SWOGLWindow.cpp:93-101` | `SWOGLWindow::ShowImage`: added conditional byteswap on BE for XFB display — converts native u32 byte order to GL_RGBA byte order before `glTexImage2D` upload. |
+| `PulseAudioStream.cpp:88` | `PA_SAMPLE_S16LE` → `PA_SAMPLE_S16NE` (BE host was telling PulseAudio that BE sample data is LE — caused static noise on all audio output). |
 
 ### SI / EXI
 
