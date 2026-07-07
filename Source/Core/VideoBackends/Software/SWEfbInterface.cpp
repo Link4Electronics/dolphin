@@ -255,9 +255,9 @@ static u32 GetSourceFactor(u8* srcClr, u8* dstClr, SrcBlendFactor mode)
   case SrcBlendFactor::One:
     return 0xffffffff;
   case SrcBlendFactor::DstClr:
-    return *(u32*)dstClr;
+    return ReadU32LE(dstClr);
   case SrcBlendFactor::InvDstClr:
-    return 0xffffffff - *(u32*)dstClr;
+    return 0xffffffff - ReadU32LE(dstClr);
   case SrcBlendFactor::SrcAlpha:
   {
     u8 alpha = srcClr[ALP_C];
@@ -296,9 +296,9 @@ static u32 GetDestinationFactor(u8* srcClr, u8* dstClr, DstBlendFactor mode)
   case DstBlendFactor::One:
     return 0xffffffff;
   case DstBlendFactor::SrcClr:
-    return *(u32*)srcClr;
+    return ReadU32LE(srcClr);
   case DstBlendFactor::InvSrcClr:
-    return 0xffffffff - *(u32*)srcClr;
+    return 0xffffffff - ReadU32LE(srcClr);
   case DstBlendFactor::SrcAlpha:
   {
     u8 alpha = srcClr[ALP_C];

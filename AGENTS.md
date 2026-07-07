@@ -199,8 +199,10 @@ Wiimote unions are not needed for GC-only use (Swiss on a GameCube).
 | `SWEfbInterface.cpp:147-170` | `GetPixelColor`: `memcpy` read + `swap32` on BE via `ReadU32LE`. |
 | `SWEfbInterface.cpp:193-247` | `SetPixelDepth`/`GetPixelDepth`: same `ReadU32LE`/`WriteU32LE` fix. |
 | `SWEfbInterface.cpp:431-452` | `BlendTev`: byteswap `dstClr` on BE before `(u8*)&dstClr` cast so the byte pointer yields correct ABGR channel order. `LogicBlend` path uses `ReadU32LE(color)` instead of `*((u32*)color)`. |
+| `SWEfbInterface.cpp:258,260` | `GetSourceFactor`: `DstClr`/`InvDstClr` cases: `*(u32*)dstClr` → `ReadU32LE(dstClr)`. On BE, `*(u32*)` on ABGR byte array reversed channels, causing `BlendColor` loop iteration to apply wrong per-channel factors → Red=0 for opaque dest, Blue=Green factor, etc. |
+| `SWEfbInterface.cpp:299,301` | `GetDestinationFactor`: `SrcClr`/`InvSrcClr` cases: same `*(u32*)srcClr` → `ReadU32LE(srcClr)` fix. |
 
-**Root cause:** The SW EFB uses `*(u32*)ptr` to read/write u32 values from/to a `u8[]` pixel array. The color array is `{alpha, blue, green, red}` by `ChannelComponentIndex` (ALP_C=0, BLU_C=1, GRN_C=2, RED_C=3). On LE, `*(u32*)` reads bytes `[A,B,G,R]` → u32 = `A|B<<8|G<<16|R<<24` (the intended LE layout). On BE, it reads `[A,B,G,R]` → u32 = `A<<24|B<<16|G<<8|R` (bytes reversed in u32 bits). All bit-manipulation expressions (masks, shifts) are designed for the LE value, producing garbage on BE. The fix wraps every u32 load/store in `ReadU32LE()`/`WriteU32LE()` which byteswaps on BE, restoring the intended LE semantics.
+**Root cause:** The SW EFB uses `*(u32*)ptr` to read/write u32 values from/to a `u8[]` pixel array. The color array is `{alpha, blue, green, red}` by `ChannelComponentIndex` (ALP_C=0, BLU_C=1, GRN_C=2, RED_C=3). On LE, `*(u32*)` reads bytes `[A,B,G,R]` → u32 = `A|B<<8|G<<16|R<<24` (the intended LE layout). On BE, it reads `[A,B,G,R]` → u32 = `A<<24|B<<16|G<<8|R` (bytes reversed in u32 bits). All bit-manipulation expressions (masks, shifts) are designed for the LE value, producing garbage on BE. The fix wraps every u32 load/store in `ReadU32LE()`/`WriteU32LE()` which byteswaps on BE, restoring the intended LE semantics. This affects EFB pixel read/write, Tev output blend factor computation (`DstClr`, `SrcClr`, `InvDstClr`, `InvSrcClr`), and blend logic ops.
 
 ### SI / EXI
 
