@@ -16,7 +16,9 @@ namespace
 {
 u32 SubtractBE32(u32 minuend_be, u32 subtrahend_le)
 {
-  return Common::swap32(Common::swap32(minuend_be) - subtrahend_le);
+  const u32 minuend_host = Common::FromBigEndian(minuend_be);
+  const u32 result_host = minuend_host - subtrahend_le;
+  return Common::ToBigEndian(result_host);
 }
 
 void Replace(u64 offset, u64 size, u8* out_ptr, u64 replace_offset, u64 replace_size,
@@ -47,7 +49,8 @@ namespace DiscIO
 std::unique_ptr<TGCFileReader> TGCFileReader::Create(File::DirectIOFile file)
 {
   TGCHeader header;
-  if (file.OffsetRead(0, Common::AsWritableU8Span(header)) && header.magic == TGC_MAGIC)
+  if (file.OffsetRead(0, Common::AsWritableU8Span(header)) &&
+      Common::FromLittleEndian(header.magic) == TGC_MAGIC)
   {
     return std::unique_ptr<TGCFileReader>(new TGCFileReader(std::move(file)));
   }
@@ -61,8 +64,8 @@ TGCFileReader::TGCFileReader(File::DirectIOFile file) : m_file(std::move(file))
 
   m_size = m_file.GetSize();
 
-  const u32 fst_offset = Common::swap32(m_header.fst_real_offset);
-  const u32 fst_size = Common::swap32(m_header.fst_size);
+  const u32 fst_offset = Common::FromBigEndian(m_header.fst_real_offset);
+  const u32 fst_size = Common::FromBigEndian(m_header.fst_size);
   m_fst.resize(fst_size);
   if (!m_file.OffsetRead(fst_offset, m_fst))
   {
@@ -75,11 +78,11 @@ TGCFileReader::TGCFileReader(File::DirectIOFile file) : m_file(std::move(file))
 
   // This calculation can overflow, but this is not a problem, because in that case
   // the old_offset + file_area_shift calculation later also overflows, cancelling it out
-  const u32 file_area_shift = Common::swap32(m_header.file_area_real_offset) -
-                              Common::swap32(m_header.file_area_virtual_offset) -
-                              Common::swap32(m_header.tgc_header_size);
+  const u32 file_area_shift = Common::FromBigEndian(m_header.file_area_real_offset) -
+                              Common::FromBigEndian(m_header.file_area_virtual_offset) -
+                              Common::FromBigEndian(m_header.tgc_header_size);
 
-  const size_t claimed_fst_entries = Common::swap32(m_fst.data() + 8);
+  const size_t claimed_fst_entries = Common::FromBigEndian(m_fst.data() + 8);
   const size_t fst_entries = std::min(claimed_fst_entries, m_fst.size() / FST_ENTRY_SIZE);
   for (size_t i = 0; i < fst_entries; ++i)
   {
@@ -87,8 +90,8 @@ TGCFileReader::TGCFileReader(File::DirectIOFile file) : m_file(std::move(file))
     if (m_fst[i * FST_ENTRY_SIZE] == 0)
     {
       // ...change its offset
-      const u32 old_offset = Common::swap32(m_fst.data() + i * FST_ENTRY_SIZE + 4);
-      const u32 new_offset = Common::swap32(old_offset + file_area_shift);
+      const u32 old_offset = Common::FromBigEndian(m_fst.data() + i * FST_ENTRY_SIZE + 4);
+      const u32 new_offset = Common::ToBigEndian(old_offset + file_area_shift);
       Replace<u32>(0, m_fst.size(), m_fst.data(), i * FST_ENTRY_SIZE + 4, new_offset);
     }
   }
@@ -101,12 +104,12 @@ std::unique_ptr<BlobReader> TGCFileReader::CopyReader() const
 
 u64 TGCFileReader::GetDataSize() const
 {
-  return m_size - Common::swap32(m_header.tgc_header_size);
+  return m_size - Common::FromBigEndian(m_header.tgc_header_size);
 }
 
 bool TGCFileReader::Read(u64 offset, u64 nbytes, u8* out_ptr)
 {
-  const u32 tgc_header_size = Common::swap32(m_header.tgc_header_size);
+  const u32 tgc_header_size = Common::FromBigEndian(m_header.tgc_header_size);
 
   if (m_file.OffsetRead(offset + tgc_header_size, out_ptr, nbytes))
   {
@@ -115,7 +118,7 @@ bool TGCFileReader::Read(u64 offset, u64 nbytes, u8* out_ptr)
 
     Replace<u32>(offset, nbytes, out_ptr, 0x0420, replacement_dol_offset);
     Replace<u32>(offset, nbytes, out_ptr, 0x0424, replacement_fst_offset);
-    Replace(offset, nbytes, out_ptr, Common::swap32(replacement_fst_offset), m_fst.size(),
+    Replace(offset, nbytes, out_ptr, Common::FromBigEndian(replacement_fst_offset), m_fst.size(),
             m_fst.data());
 
     return true;

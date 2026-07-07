@@ -75,8 +75,8 @@ static inline void DecodeBytes_C4_RGB565(u32* dst, const u8* src, const u8* tlut
   for (int x = 0; x < 4; x++)
   {
     u8 val = src[x];
-    *dst++ = DecodePixel_RGB565(Common::swap16(tlut[val >> 4]));
-    *dst++ = DecodePixel_RGB565(Common::swap16(tlut[val & 0xF]));
+    *dst++ = DecodePixel_RGB565(Common::FromBigEndian(tlut[val >> 4]));
+    *dst++ = DecodePixel_RGB565(Common::FromBigEndian(tlut[val & 0xF]));
   }
 }
 
@@ -86,8 +86,8 @@ static inline void DecodeBytes_C4_RGB5A3(u32* dst, const u8* src, const u8* tlut
   for (int x = 0; x < 4; x++)
   {
     u8 val = src[x];
-    *dst++ = DecodePixel_RGB5A3(Common::swap16(tlut[val >> 4]));
-    *dst++ = DecodePixel_RGB5A3(Common::swap16(tlut[val & 0xF]));
+    *dst++ = DecodePixel_RGB5A3(Common::FromBigEndian(tlut[val >> 4]));
+    *dst++ = DecodePixel_RGB5A3(Common::FromBigEndian(tlut[val & 0xF]));
   }
 }
 
@@ -106,7 +106,7 @@ static inline void DecodeBytes_C8_RGB565(u32* dst, const u8* src, const u8* tlut
   for (int x = 0; x < 8; x++)
   {
     u8 val = src[x];
-    *dst++ = DecodePixel_RGB565(Common::swap16(tlut[val]));
+    *dst++ = DecodePixel_RGB565(Common::FromBigEndian(tlut[val]));
   }
 }
 
@@ -116,7 +116,7 @@ static inline void DecodeBytes_C8_RGB5A3(u32* dst, const u8* src, const u8* tlut
   for (int x = 0; x < 8; x++)
   {
     u8 val = src[x];
-    *dst++ = DecodePixel_RGB5A3(Common::swap16(tlut[val]));
+    *dst++ = DecodePixel_RGB5A3(Common::FromBigEndian(tlut[val]));
   }
 }
 
@@ -125,7 +125,7 @@ static inline void DecodeBytes_C14X2_IA8(u32* dst, const u16* src, const u8* tlu
   const u16* tlut = (u16*)tlut_;
   for (int x = 0; x < 4; x++)
   {
-    u16 val = Common::swap16(src[x]);
+    u16 val = Common::FromBigEndian(src[x]);
     *dst++ = DecodePixel_IA8(tlut[(val & 0x3FFF)]);
   }
 }
@@ -135,8 +135,8 @@ static inline void DecodeBytes_C14X2_RGB565(u32* dst, const u16* src, const u8* 
   const u16* tlut = (u16*)tlut_;
   for (int x = 0; x < 4; x++)
   {
-    u16 val = Common::swap16(src[x]);
-    *dst++ = DecodePixel_RGB565(Common::swap16(tlut[(val & 0x3FFF)]));
+    u16 val = Common::FromBigEndian(src[x]);
+    *dst++ = DecodePixel_RGB565(Common::FromBigEndian(tlut[(val & 0x3FFF)]));
   }
 }
 
@@ -145,8 +145,8 @@ static inline void DecodeBytes_C14X2_RGB5A3(u32* dst, const u16* src, const u8* 
   const u16* tlut = (u16*)tlut_;
   for (int x = 0; x < 4; x++)
   {
-    u16 val = Common::swap16(src[x]);
-    *dst++ = DecodePixel_RGB5A3(Common::swap16(tlut[(val & 0x3FFF)]));
+    u16 val = Common::FromBigEndian(src[x]);
+    *dst++ = DecodePixel_RGB5A3(Common::FromBigEndian(tlut[(val & 0x3FFF)]));
   }
 }
 
@@ -166,8 +166,8 @@ static void DecodeDXTBlock(u32* dst, const DXTBlock* src, int pitch)
 {
   // S3TC Decoder (Note: GCN decodes differently from PC so we can't use native support)
   // Needs more speed.
-  u16 c1 = Common::swap16(src->color1);
-  u16 c2 = Common::swap16(src->color2);
+  u16 c1 = Common::FromBigEndian(src->color1);
+  u16 c2 = Common::FromBigEndian(src->color2);
   int blue1 = Convert5To8(c1 & 0x1F);
   int blue2 = Convert5To8(c2 & 0x1F);
   int green1 = Convert6To8((c1 >> 5) & 0x3F);
@@ -900,10 +900,10 @@ static void TexDecoder_DecodeImpl_RGB5A3(u32* dst, const u8* src, int width, int
         const u16* newsrc = (const u16*)(src + 8 * xStep);
 
         // TODO: weak point
-        const u16 val0 = Common::swap16(newsrc[0]);
-        const u16 val1 = Common::swap16(newsrc[1]);
-        const u16 val2 = Common::swap16(newsrc[2]);
-        const u16 val3 = Common::swap16(newsrc[3]);
+        const u16 val0 = Common::FromBigEndian(newsrc[0]);
+        const u16 val1 = Common::FromBigEndian(newsrc[1]);
+        const u16 val2 = Common::FromBigEndian(newsrc[2]);
+        const u16 val3 = Common::FromBigEndian(newsrc[3]);
 
         const __m128i valV = _mm_set_epi16(0, val3, 0, val2, 0, val1, 0, val0);
 

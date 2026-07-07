@@ -66,6 +66,19 @@ private:
     // DO NOT obey the warning and give this struct a name. Things will fail.
     struct
     {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      u32 : 18;
+      u32 ROMDIS : 1;  // ROM Disable
+      u32 EXT : 1;     // External Insertion Status (1: External EXI device present)
+      u32 EXTINT : 1;
+      u32 EXTINTMASK : 1;
+      u32 CHIP_SELECT : 3;  // CS1 and CS2 are Channel 0 only
+      u32 CLK : 3;
+      u32 TCINT : 1;
+      u32 TCINTMASK : 1;
+      u32 EXIINT : 1;
+      u32 EXIINTMASK : 1;
+#else
       // Indentation Meaning:
       // Channels 0, 1, 2
       //  Channels 0, 1 only
@@ -81,6 +94,7 @@ private:
       u32 EXT : 1;     // External Insertion Status (1: External EXI device present)
       u32 ROMDIS : 1;  // ROM Disable
       u32 : 18;
+#endif
     };
     UEXI_STATUS() = default;
     explicit UEXI_STATUS(u32 hex) : Hex{hex} {}
@@ -92,11 +106,19 @@ private:
     u32 Hex = 0;
     struct
     {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      u32 : 26;
+      u32 TLEN : 2;
+      u32 RW : 2;
+      u32 DMA : 1;
+      u32 TSTART : 1;
+#else
       u32 TSTART : 1;
       u32 DMA : 1;
       u32 RW : 2;
       u32 TLEN : 2;
       u32 : 26;
+#endif
     };
   };
 

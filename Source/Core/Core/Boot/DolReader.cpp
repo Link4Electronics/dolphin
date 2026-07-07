@@ -41,10 +41,10 @@ bool DolReader::Initialize(std::span<const u8> buffer)
   // swap memory
   u32* p = (u32*)&m_dolheader;
   for (size_t i = 0; i < (sizeof(SDolHeader) / sizeof(u32)); i++)
-    p[i] = Common::swap32(p[i]);
+    p[i] = Common::FromBigEndian(p[i]);
 
-  const u32 HID4_pattern = Common::swap32(0x7c13fba6);
-  const u32 HID4_mask = Common::swap32(0xfc1fffff);
+  const u32 HID4_pattern = Common::FromBigEndian(0x7c13fba6);
+  const u32 HID4_mask = Common::FromBigEndian(0xfc1fffff);
 
   m_is_wii = false;
 
@@ -103,7 +103,7 @@ bool DolReader::Initialize(std::span<const u8> buffer)
       m_dolheader.dataAddress[0] == ESPRESSO_ANCAST_LOCATION_VIRT)
   {
     // Check for the ancast magic
-    if (Common::swap32(m_data_sections[0].data()) == ANCAST_MAGIC)
+    if (Common::FromBigEndian(m_data_sections[0].data()) == ANCAST_MAGIC)
       m_is_ancast = true;
   }
 
@@ -157,31 +157,31 @@ bool DolReader::LoadAncastIntoMemory(Core::System& system) const
   const auto* header = reinterpret_cast<const EspressoAncastHeader*>(section.data());
 
   // Verify header block size
-  if (Common::swap32(header->header_block.header_block_size) != sizeof(AncastHeaderBlock))
+  if (Common::FromBigEndian(header->header_block.header_block_size) != sizeof(AncastHeaderBlock))
   {
     ERROR_LOG_FMT(BOOT, "Ancast: Invalid header block size: 0x{:x}",
-                  Common::swap32(header->header_block.header_block_size));
+                  Common::FromBigEndian(header->header_block.header_block_size));
     return false;
   }
 
   // Make sure this is a PPC ancast image
-  if (Common::swap32(header->signature_block.signature_type) != 0x01)
+  if (Common::FromBigEndian(header->signature_block.signature_type) != 0x01)
   {
     ERROR_LOG_FMT(BOOT, "Ancast: Invalid signature type: 0x{:x}",
-                  Common::swap32(header->signature_block.signature_type));
+                  Common::FromBigEndian(header->signature_block.signature_type));
     return false;
   }
 
   // Make sure this is a Wii-Mode ancast image
-  if (Common::swap32(header->info_block.image_type) != ANCAST_IMAGE_TYPE_ESPRESSO_WII)
+  if (Common::FromBigEndian(header->info_block.image_type) != ANCAST_IMAGE_TYPE_ESPRESSO_WII)
   {
     ERROR_LOG_FMT(BOOT, "Ancast: Invalid image type: 0x{:x}",
-                  Common::swap32(header->info_block.image_type));
+                  Common::FromBigEndian(header->info_block.image_type));
     return false;
   }
 
   // Verify the body size
-  const u32 body_size = Common::swap32(header->info_block.body_size);
+  const u32 body_size = Common::FromBigEndian(header->info_block.body_size);
   if (body_size + sizeof(EspressoAncastHeader) > section.size())
   {
     ERROR_LOG_FMT(BOOT, "Ancast: Invalid body size: 0x{:x}", body_size);
@@ -199,14 +199,14 @@ bool DolReader::LoadAncastIntoMemory(Core::System& system) const
 
   // Check if this is a retail or dev image
   bool is_dev = false;
-  if (Common::swap32(header->info_block.console_type) == ANCAST_CONSOLE_TYPE_DEV)
+  if (Common::FromBigEndian(header->info_block.console_type) == ANCAST_CONSOLE_TYPE_DEV)
   {
     is_dev = true;
   }
-  else if (Common::swap32(header->info_block.console_type) != ANCAST_CONSOLE_TYPE_RETAIL)
+  else if (Common::FromBigEndian(header->info_block.console_type) != ANCAST_CONSOLE_TYPE_RETAIL)
   {
     ERROR_LOG_FMT(BOOT, "Ancast: Invalid console type: 0x{:x}",
-                  Common::swap32(header->info_block.console_type));
+                  Common::FromBigEndian(header->info_block.console_type));
     return false;
   }
 

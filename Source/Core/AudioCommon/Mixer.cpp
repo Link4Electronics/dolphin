@@ -222,7 +222,7 @@ void Mixer::PushSamples(const s16* samples, std::size_t num_samples)
     const s16* ptr = samples;
     for (std::size_t i = 0; i != num_samples; ++i)
     {
-      m_dma_mixer.PushSample(Common::swap16(ptr[1]), Common::swap16(ptr[0]));
+      m_dma_mixer.PushSample(Common::FromBigEndian(ptr[1]), Common::FromBigEndian(ptr[0]));
       ptr += 2;
     }
   }
@@ -245,7 +245,7 @@ void Mixer::PushStreamingSamples(const s16* samples, std::size_t num_samples)
     const s16* ptr = samples;
     for (std::size_t i = 0; i != num_samples; ++i)
     {
-      m_streaming_mixer.PushSample(Common::swap16(ptr[1]), Common::swap16(ptr[0]));
+      m_streaming_mixer.PushSample(Common::FromBigEndian(ptr[1]), Common::FromBigEndian(ptr[0]));
       ptr += 2;
     }
   }

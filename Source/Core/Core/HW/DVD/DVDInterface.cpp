@@ -147,7 +147,7 @@ size_t DVDInterface::ProcessDTKSamples(s16* target_samples, size_t target_block_
     {
       // TODO: Fix the mixer so it can accept non-byte-swapped samples.
       s16* sample = &target_samples[samples_processed * 2 + j];
-      *sample = Common::swap16(*sample);
+      *sample = Common::ToBigEndian(*sample);
     }
     samples_processed += StreamADPCM::SAMPLES_PER_BLOCK;
     bytes_processed += StreamADPCM::ONE_BLOCK_SIZE;

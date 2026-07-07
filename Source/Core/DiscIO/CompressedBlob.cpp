@@ -40,14 +40,25 @@ CompressedBlobReader::CompressedBlobReader(File::DirectIOFile file, std::string 
   m_file.Seek(0, File::SeekOrigin::Begin);
   m_file.Read(Common::AsWritableU8Span(m_header));
 
+  m_header.magic_cookie = Common::FromLittleEndian(m_header.magic_cookie);
+  m_header.sub_type = Common::FromLittleEndian(m_header.sub_type);
+  m_header.compressed_data_size = Common::FromLittleEndian(m_header.compressed_data_size);
+  m_header.data_size = Common::FromLittleEndian(m_header.data_size);
+  m_header.block_size = Common::FromLittleEndian(m_header.block_size);
+  m_header.num_blocks = Common::FromLittleEndian(m_header.num_blocks);
+
   SetSectorSize(m_header.block_size);
 
   // cache block pointers and hashes
   m_block_pointers.resize(m_header.num_blocks);
   m_file.Read(Common::AsWritableU8Span(m_block_pointers));
+  for (auto& ptr : m_block_pointers)
+    ptr = Common::FromLittleEndian(ptr);
 
   m_hashes.resize(m_header.num_blocks);
   m_file.Read(Common::AsWritableU8Span(m_hashes));
+  for (auto& hash : m_hashes)
+    hash = Common::FromLittleEndian(hash);
 
   m_data_offset = (sizeof(CompressedBlobHeader)) +
                   (sizeof(u64)) * m_header.num_blocks     // skip block pointers
@@ -361,6 +372,18 @@ bool ConvertToGCZ(BlobReader* infile, const std::string& infile_path,
   }
   else
   {
+    // Convert to little-endian for writing (GCZ format is LE)
+    header.magic_cookie = Common::ToLittleEndian(header.magic_cookie);
+    header.sub_type = Common::ToLittleEndian(header.sub_type);
+    header.compressed_data_size = Common::ToLittleEndian(header.compressed_data_size);
+    header.data_size = Common::ToLittleEndian(header.data_size);
+    header.block_size = Common::ToLittleEndian(header.block_size);
+    header.num_blocks = Common::ToLittleEndian(header.num_blocks);
+    for (auto& offset : offsets)
+      offset = Common::ToLittleEndian(offset);
+    for (auto& hash : hashes)
+      hash = Common::ToLittleEndian(hash);
+
     // Okay, go back and fill in headers
     outfile.Seek(0, File::SeekOrigin::Begin);
     outfile.Write(Common::AsU8Span(header));
@@ -386,7 +409,8 @@ bool ConvertToGCZ(BlobReader* infile, const std::string& infile_path,
 bool IsGCZBlob(File::DirectIOFile& file)
 {
   CompressedBlobHeader header;
-  return file.OffsetRead(0, Common::AsWritableU8Span(header)) && header.magic_cookie == GCZ_MAGIC;
+  return file.OffsetRead(0, Common::AsWritableU8Span(header)) &&
+         Common::FromLittleEndian(header.magic_cookie) == GCZ_MAGIC;
 }
 
 }  // namespace DiscIO

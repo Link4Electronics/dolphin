@@ -331,7 +331,7 @@ void Jit64::reg_imm(UGeckoInstruction inst)
   case 24:  // ori
   case 25:  // oris
   {
-    const u32 immediate = inst.OPCD == 24 ? inst.UIMM : inst.UIMM << 16;
+    const u32 immediate = inst.OPCD == 24 ? u32(inst.UIMM) : u32(inst.UIMM << 16);
     regimmop(a, s, true, immediate, Or, &XEmitter::OR);
     break;
   }
@@ -344,7 +344,7 @@ void Jit64::reg_imm(UGeckoInstruction inst)
   case 26:  // xori
   case 27:  // xoris
   {
-    const u32 immediate = inst.OPCD == 26 ? inst.UIMM : inst.UIMM << 16;
+    const u32 immediate = inst.OPCD == 26 ? u32(inst.UIMM) : u32(inst.UIMM << 16);
     regimmop(a, s, true, immediate, Xor, &XEmitter::XOR, false);
     break;
   }
@@ -1811,7 +1811,7 @@ void Jit64::arithXex(UGeckoInstruction inst)
   bool mex = !!(inst.SUBOP10 & 32);       // addmex/subfmex or addzex/subfzex
   bool add = !!(inst.SUBOP10 & 2);        // add or sub
   int a = inst.RA;
-  int b = regsource ? inst.RB : a;
+  int b = regsource ? int(inst.RB) : a;
   int d = inst.RD;
   bool same_input_sub = !add && regsource && a == b;
 

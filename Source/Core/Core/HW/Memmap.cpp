@@ -734,21 +734,21 @@ u16 MemoryManager::Read_U16(u32 address) const
 {
   u16 value = 0;
   CopyFromEmu(&value, address, sizeof(value));
-  return Common::swap16(value);
+  return Common::FromBigEndian(value);
 }
 
 u32 MemoryManager::Read_U32(u32 address) const
 {
   u32 value = 0;
   CopyFromEmu(&value, address, sizeof(value));
-  return Common::swap32(value);
+  return Common::FromBigEndian(value);
 }
 
 u64 MemoryManager::Read_U64(u32 address) const
 {
   u64 value = 0;
   CopyFromEmu(&value, address, sizeof(value));
-  return Common::swap64(value);
+  return Common::FromBigEndian(value);
 }
 
 u32 MemoryManager::Read_U32_Swap(u32 address) const
@@ -765,19 +765,19 @@ void MemoryManager::Write_U8(u8 value, u32 address)
 
 void MemoryManager::Write_U16(u16 value, u32 address)
 {
-  u16 swapped_value = Common::swap16(value);
+  u16 swapped_value = Common::ToBigEndian(value);
   CopyToEmu(address, &swapped_value, sizeof(swapped_value));
 }
 
 void MemoryManager::Write_U32(u32 value, u32 address)
 {
-  u32 swapped_value = Common::swap32(value);
+  u32 swapped_value = Common::ToBigEndian(value);
   CopyToEmu(address, &swapped_value, sizeof(swapped_value));
 }
 
 void MemoryManager::Write_U64(u64 value, u32 address)
 {
-  u64 swapped_value = Common::swap64(value);
+  u64 swapped_value = Common::ToBigEndian(value);
   CopyToEmu(address, &swapped_value, sizeof(swapped_value));
 }
 

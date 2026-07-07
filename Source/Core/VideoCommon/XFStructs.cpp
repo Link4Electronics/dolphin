@@ -235,7 +235,7 @@ void LoadXFReg(u16 base_address, u8 transfer_size, const u8* data)
     XFMemWritten(xf_state_manager, xf_mem_transfer_size, xf_mem_base);
     for (u32 i = 0; i < xf_mem_transfer_size; i++)
     {
-      ((u32*)&xfmem)[xf_mem_base + i] = Common::swap32(data);
+      ((u32*)&xfmem)[xf_mem_base + i] = Common::FromBigEndian(data);
       data += 4;
     }
   }
@@ -245,7 +245,7 @@ void LoadXFReg(u16 base_address, u8 transfer_size, const u8* data)
   {
     for (u32 address = base_address; address < end_address; address++)
     {
-      const u32 value = Common::swap32(data);
+      const u32 value = Common::FromBigEndian(data);
 
       XFRegWritten(system, xf_state_manager, address, value);
       ((u32*)&xfmem)[address] = value;
@@ -281,7 +281,7 @@ void LoadIndexedXF(CPArray array, u32 index, u16 address, u8 size)
   bool changed = false;
   for (u32 i = 0; i < size; ++i)
   {
-    if (currData[i] != Common::swap32(newData[i]))
+    if (currData[i] != Common::FromBigEndian(newData[i]))
     {
       changed = true;
       XFMemWritten(xf_state_manager, size, address);
@@ -291,7 +291,7 @@ void LoadIndexedXF(CPArray array, u32 index, u16 address, u8 size)
   if (changed)
   {
     for (u32 i = 0; i < size; ++i)
-      currData[i] = Common::swap32(newData[i]);
+      currData[i] = Common::FromBigEndian(newData[i]);
   }
 }
 
@@ -581,7 +581,7 @@ std::pair<std::string, std::string> GetXFTransferInfo(u16 base_address, u8 trans
   else if (transfer_size == 1 && base_address >= XFMEM_REGISTERS_START)
   {
     // Write directly to a single register
-    const u32 value = Common::swap32(data);
+    const u32 value = Common::FromBigEndian(data);
     return GetXFRegInfo(base_address, value);
   }
 
@@ -614,7 +614,7 @@ std::pair<std::string, std::string> GetXFTransferInfo(u16 base_address, u8 trans
 
     for (u32 i = 0; i < xf_mem_transfer_size; i++)
     {
-      const auto mem_desc = GetXFMemDescription(xf_mem_base + i, Common::swap32(data));
+      const auto mem_desc = GetXFMemDescription(xf_mem_base + i, Common::FromBigEndian(data));
       fmt::format_to(std::back_inserter(desc), "{}{}", i != 0 ? "\n" : "", mem_desc);
       data += 4;
     }
@@ -631,7 +631,7 @@ std::pair<std::string, std::string> GetXFTransferInfo(u16 base_address, u8 trans
 
     for (u32 address = base_address; address < end_address; address++)
     {
-      const u32 value = Common::swap32(data);
+      const u32 value = Common::FromBigEndian(data);
 
       const auto [regname, regdesc] = GetXFRegInfo(address, value);
       fmt::format_to(std::back_inserter(desc), "{}\n{}\n", regname, regdesc);

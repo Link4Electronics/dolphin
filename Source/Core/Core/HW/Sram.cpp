@@ -63,7 +63,9 @@ void SetCardFlashID(Sram* sram, const u8* buffer, ExpansionInterface::Slot card_
     return;
   }
 
-  u64 rand = Common::swap64(&buffer[12]);
+  u64 rand;
+std::memcpy(&rand, &buffer[12], sizeof(u64));
+rand = Common::FromBigEndian(rand);
   u8 csum = 0;
   for (int i = 0; i < 12; i++)
   {

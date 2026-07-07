@@ -280,7 +280,10 @@ bool NANDImporter::ExtractCertificates()
           certificate_offset, min_offset, content_bytes.size());
       return false;
     }
-    const u16 certificate_size = Common::swap16(&content_bytes[certificate_offset - min_offset]);
+    u16 certificate_size_raw;
+    std::memcpy(&certificate_size_raw, &content_bytes[certificate_offset - min_offset],
+                sizeof(u16));
+    const u16 certificate_size = Common::FromBigEndian(certificate_size_raw);
     const size_t available_size = content_bytes.size() - static_cast<size_t>(certificate_offset);
     if (certificate_size > available_size)
     {

@@ -23,7 +23,7 @@ void LaggedFibonacciGenerator::SetSeed(const u8 seed[SEED_SIZE * sizeof(u32)])
   m_position_bytes = 0;
 
   for (size_t i = 0; i < SEED_SIZE; ++i)
-    m_buffer[i] = Common::swap32(seed + i * sizeof(u32));
+    m_buffer[i] = Common::FromBigEndian(seed + i * sizeof(u32));
 
   Initialize(false);
 }
@@ -69,7 +69,8 @@ bool LaggedFibonacciGenerator::GetSeed(const u32* data, size_t size, size_t data
 
   // If the data doesn't look like something we can regenerate, return early to save time
   if (!std::all_of(data, data + LFG_K, [](u32 x) {
-        return (Common::swap32(x) & 0x00C00000) == (Common::swap32(x) >> 2 & 0x00C00000);
+        return (Common::FromBigEndian(x) & 0x00C00000) ==
+               (Common::FromBigEndian(x) >> 2 & 0x00C00000);
       }))
   {
     return false;
@@ -78,8 +79,10 @@ bool LaggedFibonacciGenerator::GetSeed(const u32* data, size_t size, size_t data
   const size_t data_offset_mod_k = data_offset % LFG_K;
   const size_t data_offset_div_k = data_offset / LFG_K;
 
-  std::copy_n(data, LFG_K - data_offset_mod_k, lfg->m_buffer.data() + data_offset_mod_k);
-  std::copy_n(data + LFG_K - data_offset_mod_k, data_offset_mod_k, lfg->m_buffer.data());
+  for (size_t i = 0; i < LFG_K - data_offset_mod_k; ++i)
+    lfg->m_buffer[data_offset_mod_k + i] = Common::FromBigEndian(data[i]);
+  for (size_t i = 0; i < data_offset_mod_k; ++i)
+    lfg->m_buffer[i] = Common::FromBigEndian(data[LFG_K - data_offset_mod_k + i]);
 
   lfg->Backward(0, data_offset_mod_k);
 
@@ -201,7 +204,7 @@ bool LaggedFibonacciGenerator::Initialize(bool check_existing_data)
   // Instead of doing the "shift by 18 instead of 16" oddity when actually outputting the data,
   // we can do the shifting (and byteswapping) at this point to make the output code simpler.
   for (u32& x : m_buffer)
-    x = Common::swap32((x & 0xFF00FFFF) | ((x >> 2) & 0x00FF0000));
+    x = Common::ToBigEndian((x & 0xFF00FFFF) | ((x >> 2) & 0x00FF0000));
 
   for (size_t i = 0; i < 4; ++i)
     Forward();

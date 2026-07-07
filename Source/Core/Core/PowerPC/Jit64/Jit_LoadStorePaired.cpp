@@ -28,10 +28,10 @@ void Jit64::psq_stXX(UGeckoInstruction inst)
   bool indexed = inst.OPCD == 4;
   bool update = (inst.OPCD == 61 && offset) || (inst.OPCD == 4 && !!(inst.SUBOP6 & 32));
   int a = inst.RA;
-  int b = indexed ? inst.RB : a;
+  int b = indexed ? int(inst.RB) : a;
   int s = inst.FS;
-  int i = indexed ? inst.Ix : inst.I;
-  int w = indexed ? inst.Wx : inst.W;
+  int i = indexed ? int(inst.Ix) : int(inst.I);
+  int w = indexed ? int(inst.Wx) : int(inst.W);
   FALLBACK_IF(!a);
 
   FlushRegistersBeforeSlowAccess();
@@ -119,10 +119,10 @@ void Jit64::psq_lXX(UGeckoInstruction inst)
   bool indexed = inst.OPCD == 4;
   bool update = (inst.OPCD == 57 && offset) || (inst.OPCD == 4 && !!(inst.SUBOP6 & 32));
   int a = inst.RA;
-  int b = indexed ? inst.RB : a;
+  int b = indexed ? int(inst.RB) : a;
   int s = inst.FS;
-  int i = indexed ? inst.Ix : inst.I;
-  int w = indexed ? inst.Wx : inst.W;
+  int i = indexed ? int(inst.Ix) : int(inst.I);
+  int w = indexed ? int(inst.Wx) : int(inst.W);
   FALLBACK_IF(!a);
 
   FlushRegistersBeforeSlowAccess();

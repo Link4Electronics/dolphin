@@ -18,11 +18,11 @@
 
 static void bswap(u32& w)
 {
-  w = Common::swap32(w);
+  w = Common::FromBigEndian(w);
 }
 static void bswap(u16& w)
 {
-  w = Common::swap16(w);
+  w = Common::FromBigEndian(w);
 }
 
 static void byteswapHeader(Elf32_Ehdr& ELF_H)
@@ -195,15 +195,15 @@ bool ElfReader::LoadSymbols(const Core::CPUThreadGuard& guard, PPCSymbolDB& ppc_
     int numSymbols = sections[sec].sh_size / sizeof(Elf32_Sym);
     for (int sym = 0; sym < numSymbols; sym++)
     {
-      int size = Common::swap32(symtab[sym].st_size);
+      int size = Common::FromBigEndian(symtab[sym].st_size);
       if (size == 0)
         continue;
 
       // int bind = symtab[sym].st_info >> 4;
       int type = symtab[sym].st_info & 0xF;
-      int sectionIndex = Common::swap16(symtab[sym].st_shndx);
-      int value = Common::swap32(symtab[sym].st_value);
-      const char* name = stringBase + Common::swap32(symtab[sym].st_name);
+      int sectionIndex = Common::FromBigEndian(symtab[sym].st_shndx);
+      int value = Common::FromBigEndian(symtab[sym].st_value);
+      const char* name = stringBase + Common::FromBigEndian(symtab[sym].st_name);
       if (bRelocate)
         value += sectionAddrs[sectionIndex];
 
@@ -236,8 +236,8 @@ bool ElfReader::IsWii() const
   // better heuristic are welcome.
 
   // Swap these once, instead of swapping every word in the file.
-  u32 HID4_pattern = Common::swap32(0x7c13fba6);
-  u32 HID4_mask = Common::swap32(0xfc1fffff);
+  u32 HID4_pattern = Common::FromBigEndian(0x7c13fba6);
+  u32 HID4_mask = Common::FromBigEndian(0xfc1fffff);
 
   for (int i = 0; i < GetNumSegments(); ++i)
   {

@@ -188,6 +188,7 @@ private:
 
   static void SetupGCMemory(Core::System& system, const Core::CPUThreadGuard& guard);
   static bool SetupWiiMemory(Core::System& system, IOS::HLE::IOSC::ConsoleType console_type);
+  static void CopyDefaultExceptionHandlers(Core::System& system);
 };
 
 class BootExecutableReader

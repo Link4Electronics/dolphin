@@ -198,7 +198,7 @@ u16 DSPHLE::DSP_WriteControlRegister(u16 value)
 
   if (m_dsp_control.DSPHalt != temp.DSPHalt)
   {
-    INFO_LOG_FMT(DSPHLE, "DSP_CONTROL halt bit changed: {:04x} -> {:04x}", m_dsp_control.Hex,
+    INFO_LOG_FMT(DSPHLE, "DSP_CONTROL halt bit changed: {:04x} -> {:04x}", m_dsp_control.GekkoHex(),
                  value);
     m_mail_handler.SetHalted(temp.DSPHalt);
   }

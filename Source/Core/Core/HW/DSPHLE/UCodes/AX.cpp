@@ -79,7 +79,7 @@ bool AXUCode::LoadResamplingCoefficients(bool require_same_checksum, u32 desired
 
     std::memcpy(m_coeffs.data(), raw_coeffs.data(), raw_coeffs_size);
     for (auto& coef : m_coeffs)
-      coef = Common::swap16(coef);
+      coef = Common::FromBigEndian(coef);
 
     INFO_LOG_FMT(DSPHLE, "Using polyphase resampling coeffs from {}", filename);
     m_coeffs_checksum = checksum;
@@ -397,7 +397,7 @@ void AXUCode::DownloadAndMixWithVolume(u32 addr, u16 vol_main, u16 vol_auxa, u16
       int* buffer = buffers[i][j];
       for (u32 k = 0; k < 5 * 32; ++k)
       {
-        s64 sample = (s64)(s32)Common::swap32(*ptr++);
+        s64 sample = (s64)(s32)Common::FromBigEndian(*ptr++);
         sample *= volume;
         buffer[k] += (s32)(sample >> 15);
       }
@@ -529,11 +529,11 @@ void AXUCode::MixAUXSamples(int aux_id, u32 write_addr, u32 read_addr)
                      sizeof(m_samples_main_surround)));
 
   for (auto& sample : m_samples_main_left)
-    sample += (int)Common::swap32(*ptr++);
+    sample += (int)Common::FromBigEndian(*ptr++);
   for (auto& sample : m_samples_main_right)
-    sample += (int)Common::swap32(*ptr++);
+    sample += (int)Common::FromBigEndian(*ptr++);
   for (auto& sample : m_samples_main_surround)
-    sample += (int)Common::swap32(*ptr++);
+    sample += (int)Common::FromBigEndian(*ptr++);
 }
 
 void AXUCode::UploadLRS(u32 dst_addr)
@@ -553,7 +553,7 @@ void AXUCode::SetMainLR(u32 src_addr)
   int* ptr = reinterpret_cast<int*>(memory.GetPointerForRange(src_addr, 5 * 32 * sizeof(int)));
   for (u32 i = 0; i < 5 * 32; ++i)
   {
-    int samp = (int)Common::swap32(*ptr++);
+    int samp = (int)Common::FromBigEndian(*ptr++);
     m_samples_main_left[i] = samp;
     m_samples_main_right[i] = samp;
     m_samples_main_surround[i] = 0;
@@ -602,7 +602,7 @@ void AXUCode::RunCompressor(u16 threshold, u16 release_frames, u32 table_addr, u
       memory.GetPointerForRange(table_addr + table_offset, 32 * millis * sizeof(u16)));
   for (u32 i = 0; i < 32 * millis; ++i)
   {
-    u16 coef = Common::swap16(*ramp++);
+    u16 coef = Common::FromBigEndian(*ramp++);
     m_samples_main_left[i] = (s64(m_samples_main_left[i]) * coef) >> 15;
     m_samples_main_right[i] = (s64(m_samples_main_right[i]) * coef) >> 15;
   }
@@ -622,8 +622,8 @@ void AXUCode::OutputSamples(u32 lr_addr, u32 surround_addr)
     s16 left = ClampS16(m_samples_main_left[i]);
     s16 right = ClampS16(m_samples_main_right[i]);
 
-    buffer[2 * i + 0] = Common::swap16(right);
-    buffer[2 * i + 1] = Common::swap16(left);
+    buffer[2 * i + 0] = Common::ToBigEndian(right);
+    buffer[2 * i + 1] = Common::ToBigEndian(left);
   }
 
   memory.CopyToEmu(lr_addr, buffer, sizeof(buffer));
@@ -641,13 +641,13 @@ void AXUCode::MixAUXBLR(u32 ul_addr, u32 dl_addr)
   int* ptr = reinterpret_cast<int*>(memory.GetPointerForRange(dl_addr, 2 * 5 * 32 * sizeof(int)));
   for (u32 i = 0; i < 5 * 32; ++i)
   {
-    int samp = Common::swap32(*ptr++);
+    int samp = Common::FromBigEndian(*ptr++);
     m_samples_auxB_left[i] = samp;
     m_samples_main_left[i] += samp;
   }
   for (u32 i = 0; i < 5 * 32; ++i)
   {
-    int samp = Common::swap32(*ptr++);
+    int samp = Common::FromBigEndian(*ptr++);
     m_samples_auxB_right[i] = samp;
     m_samples_main_right[i] += samp;
   }
@@ -659,7 +659,7 @@ void AXUCode::SetOppositeLR(u32 src_addr)
   int* ptr = reinterpret_cast<int*>(memory.GetPointerForRange(src_addr, 5 * 32 * sizeof(int)));
   for (u32 i = 0; i < 5 * 32; ++i)
   {
-    int inp = Common::swap32(*ptr++);
+    int inp = Common::FromBigEndian(*ptr++);
     m_samples_main_left[i] = -inp;
     m_samples_main_right[i] = inp;
     m_samples_main_surround[i] = 0;
@@ -700,7 +700,7 @@ void AXUCode::SendAUXAndMix(u32 auxa_lrs_up, u32 auxb_s_up, u32 main_l_dl, u32 m
     const int* dl_src =
         reinterpret_cast<int*>(memory.GetPointerForRange(dl_addrs[i], 32 * 5 * sizeof(int)));
     for (size_t j = 0; j < 32 * 5; ++j)
-      dl_buffers[i][j] += (int)Common::swap32(*dl_src++);
+      dl_buffers[i][j] += (int)Common::FromBigEndian(*dl_src++);
   }
 }
 

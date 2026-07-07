@@ -75,10 +75,17 @@ union UCommand
   u32 hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u32 : 8;
+    u32 command : 8;
+    u32 parameter2 : 8;
+    u32 parameter1 : 8;
+#else
     u32 parameter1 : 8;
     u32 parameter2 : 8;
     u32 command : 8;
     u32 : 8;
+#endif
   };
   UCommand() = default;
   UCommand(u32 value) : hex{value} {}

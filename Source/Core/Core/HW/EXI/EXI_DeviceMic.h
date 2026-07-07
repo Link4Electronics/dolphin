@@ -48,6 +48,17 @@ private:
     u8 U8[2];
     struct
     {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      u16 is_active : 1;
+      u16 buff_size : 2;
+      u16 sample_rate : 2;
+      u16 gain : 1;
+      u16 buff_ovrflw : 1;
+      u16 button : 1;
+      u16 button_unk : 3;
+      u16 id : 1;
+      u16 out : 4;
+#else
       u16 out : 4;          // MICSet/GetOut...???
       u16 id : 1;           // Used for MICGetDeviceID (always 0)
       u16 button_unk : 3;   // Button bits which appear unused
@@ -57,6 +68,7 @@ private:
       u16 sample_rate : 2;  // Sample rate, 00-11025, 01-22050, 10-44100, 11-??
       u16 buff_size : 2;    // Ring buffer size in bytes, 00-32, 01-64, 10-128, 11-???
       u16 is_active : 1;    // If we are sampling or not
+#endif
     };
   };
 

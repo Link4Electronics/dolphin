@@ -92,7 +92,7 @@ ConstantPropagationResult ConstantPropagation::EvaluateSubImmCarry(UGeckoInstruc
 
 ConstantPropagationResult ConstantPropagation::EvaluateAddImm(UGeckoInstruction inst) const
 {
-  const s32 immediate = inst.OPCD & 1 ? inst.SIMM_16 << 16 : inst.SIMM_16;
+  const s32 immediate = inst.OPCD & 1 ? s32(inst.SIMM_16 << 16) : s32(inst.SIMM_16);
 
   if (inst.RA == 0)
     return ConstantPropagationResult(inst.RD, immediate);
@@ -146,7 +146,7 @@ ConstantPropagationResult ConstantPropagation::EvaluateBitwiseImm(UGeckoInstruct
                                                                   u32 (*do_op)(u32, u32)) const
 {
   const bool is_and = do_op == &BitAND;
-  const u32 immediate = inst.OPCD & 1 ? inst.UIMM << 16 : inst.UIMM;
+  const u32 immediate = inst.OPCD & 1 ? u32(inst.UIMM << 16) : u32(inst.UIMM);
 
   if (inst.UIMM == 0 && !is_and && inst.RA == inst.RS)
     return DO_NOTHING;

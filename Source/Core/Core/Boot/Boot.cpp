@@ -468,6 +468,8 @@ bool CBoot::Load_BS2(Core::System& system, const std::string& boot_rom_filename)
     AMMediaboard::FirmwareMap(true);
   }
 
+  CopyDefaultExceptionHandlers(system);
+
   ppc_state.pc = 0x81200150;
 
   system.GetPowerPC().MSRUpdated();
@@ -482,7 +484,7 @@ static void SetDefaultDisc(DVD::DVDInterface& dvd_interface)
     SetDisc(dvd_interface, DiscIO::CreateDiscForCore(default_iso));
 }
 
-static void CopyDefaultExceptionHandlers(Core::System& system)
+void CBoot::CopyDefaultExceptionHandlers(Core::System& system)
 {
   constexpr u32 EXCEPTION_HANDLER_ADDRESSES[] = {0x00000100, 0x00000200, 0x00000300, 0x00000400,
                                                  0x00000500, 0x00000600, 0x00000700, 0x00000800,

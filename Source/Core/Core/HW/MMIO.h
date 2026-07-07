@@ -83,7 +83,10 @@ namespace Utils
 // Allow grabbing pointers to the high and low part of a 32 bits pointer.
 inline u16* LowPart(u32* ptr)
 {
-  return (u16*)ptr;
+  if constexpr (std::endian::native == std::endian::little)
+    return (u16*)ptr;
+  else
+    return (u16*)ptr + 1;
 }
 inline u16* LowPart(std::atomic<u32>* ptr)
 {
@@ -92,7 +95,10 @@ inline u16* LowPart(std::atomic<u32>* ptr)
 }
 inline u16* HighPart(u32* ptr)
 {
-  return LowPart(ptr) + 1;
+  if constexpr (std::endian::native == std::endian::little)
+    return (u16*)ptr + 1;
+  else
+    return (u16*)ptr;
 }
 inline u16* HighPart(std::atomic<u32>* ptr)
 {

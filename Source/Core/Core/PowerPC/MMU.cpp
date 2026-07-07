@@ -114,19 +114,19 @@ void MMU::DoState(PointerWrap& p, bool sr_changed)
 }
 [[maybe_unused]] static u16 bswap(u16 val)
 {
-  return Common::swap16(val);
+  return Common::FromBigEndian(val);
 }
 [[maybe_unused]] static s16 bswap(s16 val)
 {
-  return Common::swap16(val);
+  return Common::FromBigEndian(val);
 }
 [[maybe_unused]] static u32 bswap(u32 val)
 {
-  return Common::swap32(val);
+  return Common::FromBigEndian(val);
 }
 [[maybe_unused]] static u64 bswap(u64 val)
 {
-  return Common::swap64(val);
+  return Common::FromBigEndian(val);
 }
 
 static constexpr bool IsOpcodeFlag(XCheckTLBFlag flag)
@@ -222,12 +222,18 @@ T MMU::ReadFromHardware(u32 em_address)
     auto translated_addr = TranslateAddress<flag>(em_address);
     if (!translated_addr.Success())
     {
-      if (flag == XCheckTLBFlag::Read)
-        GenerateDSIException(em_address, false);
-      return 0;
+      if (m_system.IsMMUMode())
+      {
+        if (flag == XCheckTLBFlag::Read)
+          GenerateDSIException(em_address, false);
+        return 0;
+      }
     }
-    em_address = translated_addr.address;
-    wi = translated_addr.wi;
+    else
+    {
+      em_address = translated_addr.address;
+      wi = translated_addr.wi;
+    }
   }
 
   if (flag == XCheckTLBFlag::Read && (em_address & 0xF8000000) == 0x08000000)
@@ -349,12 +355,18 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
     auto translated_addr = TranslateAddress<flag>(em_address);
     if (!translated_addr.Success())
     {
-      if (flag == XCheckTLBFlag::Write)
-        GenerateDSIException(em_address, true);
-      return;
+      if (m_system.IsMMUMode())
+      {
+        if (flag == XCheckTLBFlag::Write)
+          GenerateDSIException(em_address, true);
+        return;
+      }
     }
-    em_address = translated_addr.address;
-    wi = translated_addr.wi;
+    else
+    {
+      em_address = translated_addr.address;
+      wi = translated_addr.wi;
+    }
   }
 
   // Check for a gather pipe write (which are not implemented through the MMIO system).
@@ -423,7 +435,7 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
     }
   }
 
-  const u32 swapped_data = Common::swap32(std::rotr(data, size * 8));
+  const u32 swapped_data = Common::ToBigEndian(std::rotr(data, size * 8));
 
   // Locked L1 technically doesn't have a fixed address, but games all use 0xE0000000.
   if (m_memory.GetL1Cache() && (em_address >> 28 == 0xE) &&
@@ -538,7 +550,8 @@ TryReadInstResult MMU::TryReadInstruction(u32 address)
     auto tlb_addr = TranslateAddress<XCheckTLBFlag::Opcode>(address);
     if (!tlb_addr.Success())
     {
-      return TryReadInstResult{false, false, 0, 0};
+      if (m_system.IsMMUMode())
+        return TryReadInstResult{false, false, 0, 0};
     }
     else
     {
@@ -551,7 +564,7 @@ TryReadInstResult MMU::TryReadInstruction(u32 address)
   // TODO: Refactor this. This icache implementation is totally wrong if used with the fake vmem.
   if (m_memory.GetFakeVMEM() && ((address & 0xFE000000) == 0x7E000000))
   {
-    hex = Common::swap32(&m_memory.GetFakeVMEM()[address & m_memory.GetFakeVMemMask()]);
+    hex = Common::FromBigEndian(&m_memory.GetFakeVMEM()[address & m_memory.GetFakeVMemMask()]);
   }
   else
   {
@@ -964,7 +977,8 @@ void MMU::DMA_LCToMemory(const u32 mem_address, const u32 cache_address, const u
   {
     for (u32 i = 0; i < 32 * num_blocks; i += 4)
     {
-      const u32 data = Common::swap32(m_memory.GetL1Cache() + ((cache_address + i) & 0x3FFFF));
+      const u32 data = Common::FromBigEndian(
+          &m_memory.GetL1Cache()[(cache_address + i) & 0x3FFFF]);
       EFB_Write(data, mem_address + i);
     }
     return;
@@ -976,7 +990,8 @@ void MMU::DMA_LCToMemory(const u32 mem_address, const u32 cache_address, const u
   {
     for (u32 i = 0; i < 32 * num_blocks; i += 4)
     {
-      const u32 data = Common::swap32(m_memory.GetL1Cache() + ((cache_address + i) & 0x3FFFF));
+      const u32 data = Common::FromBigEndian(
+          &m_memory.GetL1Cache()[(cache_address + i) & 0x3FFFF]);
       m_memory.GetMMIOMapping()->Write(m_system, mem_address + i, data);
     }
     return;
@@ -994,7 +1009,7 @@ void MMU::DMA_MemoryToLC(const u32 cache_address, const u32 mem_address, const u
   {
     for (u32 i = 0; i < 32 * num_blocks; i += 4)
     {
-      const u32 data = Common::swap32(EFB_Read(mem_address + i));
+      const u32 data = Common::ToBigEndian(EFB_Read(mem_address + i));
       std::memcpy(m_memory.GetL1Cache() + ((cache_address + i) & 0x3FFFF), &data, sizeof(u32));
     }
     return;
@@ -1007,7 +1022,7 @@ void MMU::DMA_MemoryToLC(const u32 cache_address, const u32 mem_address, const u
     for (u32 i = 0; i < 32 * num_blocks; i += 4)
     {
       const u32 data =
-          Common::swap32(m_memory.GetMMIOMapping()->Read<u32>(m_system, mem_address + i));
+          Common::ToBigEndian(m_memory.GetMMIOMapping()->Read<u32>(m_system, mem_address + i));
       std::memcpy(m_memory.GetL1Cache() + ((cache_address + i) & 0x3FFFF), &data, sizeof(u32));
     }
     return;

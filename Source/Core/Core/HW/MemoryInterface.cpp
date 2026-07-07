@@ -104,6 +104,13 @@ void MemoryInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
   mmio->Register(base | MI_PROT_ADDR_HI, MMIO::DirectRead<u16>(&m_mi_mem.prot_addr.lo),
                  MMIO::DirectWrite<u16>(&m_mi_mem.prot_addr.lo));
 
+  // Gap between MI_PROT_ADDR_HI (0x024) and MI_TIMER0_HI (0x032)
+  // Register as constant-0 to avoid invalid MMIO errors from software probing
+  for (u32 i = 0x026; i < 0x032; i += 2)
+  {
+    mmio->Register(base | i, MMIO::Constant<u16>(0), MMIO::Nop<u16>());
+  }
+
   for (u32 i = 0; i < m_mi_mem.timers.size(); ++i)
   {
     auto& timer = m_mi_mem.timers[i];

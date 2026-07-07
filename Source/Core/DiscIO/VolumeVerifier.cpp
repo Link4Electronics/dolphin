@@ -545,11 +545,11 @@ bool VolumeVerifier::CheckPartition(const Partition& partition)
   {
     invalid_header = true;
   }
-  else if (Common::swap32(disc_header.data() + 0x18) != WII_DISC_MAGIC)
+  else if (Common::FromBigEndian(disc_header.data() + 0x18) != WII_DISC_MAGIC)
   {
     for (size_t i = 0; i < disc_header.size(); i += 4)
     {
-      if (Common::swap32(disc_header.data() + i) != i)
+      if (Common::FromBigEndian(disc_header.data() + i) != i)
       {
         invalid_header = true;
         break;
@@ -1326,7 +1326,7 @@ void VolumeVerifier::Finish()
     if (m_hashes_to_calculate.crc32)
     {
       m_result.hashes.crc32 = std::vector<u8>(4);
-      const u32 crc32_be = Common::swap32(m_crc32_context);
+      const u32 crc32_be = Common::ToBigEndian(m_crc32_context);
       std::memcpy(m_result.hashes.crc32.data(), &crc32_be, 4);
     }
 

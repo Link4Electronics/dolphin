@@ -17,281 +17,152 @@ union UGeckoInstruction
 
   UGeckoInstruction() = default;
   UGeckoInstruction(u32 hex_) : hex(hex_) {}
-  struct
-  {
-    // Record bit
-    // 1, if the condition register should be updated by this instruction
-    u32 Rc : 1;
-    u32 SUBOP10 : 10;
-    // Source GPR
-    u32 RB : 5;
-    // Source or destination GPR
-    u32 RA : 5;
-    // Destination GPR
-    u32 RD : 5;
-    // Primary opcode
-    u32 OPCD : 6;
-  };
-  struct
-  {
-    // Immediate, signed 16-bit
-    signed SIMM_16 : 16;
-    u32 : 5;
-    // Conditions on which to trap
-    u32 TO : 5;
-    u32 OPCD_2 : 6;
-  };
-  struct
-  {
-    u32 Rc_2 : 1;
-    u32 : 10;
-    u32 : 5;
-    u32 : 5;
-    // Source GPR
-    u32 RS : 5;
-    u32 OPCD_3 : 6;
-  };
-  struct
-  {
-    // Immediate, unsigned 16-bit
-    u32 UIMM : 16;
-    u32 : 5;
-    u32 : 5;
-    u32 OPCD_4 : 6;
-  };
-  struct
-  {
-    // Link bit
-    // 1, if branch instructions should put the address of the next instruction into the link
-    // register
-    u32 LK : 1;
-    // Absolute address bit
-    // 1, if the immediate field represents an absolute address
-    u32 AA : 1;
-    // Immediate, signed 24-bit
-    u32 LI : 24;
-    u32 OPCD_5 : 6;
-  };
-  struct
-  {
-    u32 LK_2 : 1;
-    u32 AA_2 : 1;
-    // Branch displacement, signed 14-bit (right-extended by 0b00)
-    u32 BD : 14;
-    // Branch condition
-    u32 BI : 5;
-    // Conditional branch control
-    u32 BO : 5;
-    u32 OPCD_6 : 6;
-  };
-  struct
-  {
-    u32 LK_3 : 1;
-    u32 XO : 10;
-    u32 : 5;
-    u32 BI_2 : 5;
-    u32 BO_2 : 5;
-    u32 OPCD_7 : 6;
-  };
-  struct
-  {
-    u32 : 11;
-    u32 RB_2 : 5;
-    u32 RA_2 : 5;
-    // ?
-    u32 L : 1;
-    u32 : 1;
-    // Destination field in CR or FPSCR
-    u32 CRFD : 3;
-    u32 OPCD_8 : 6;
-  };
-  struct
-  {
-    signed SIMM_16_2 : 16;
-    u32 RA_3 : 5;
-    u32 L_2 : 1;
-    u32 : 1;
-    u32 CRFD_2 : 3;
-    u32 OPCD_9 : 6;
-  };
-  struct
-  {
-    u32 UIMM_2 : 16;
-    u32 RA_4 : 5;
-    u32 L_3 : 1;
-    u32 : 1;
-    u32 CRFD_3 : 3;
-    u32 OPCD_A : 6;
-  };
-  struct
-  {
-    u32 : 1;
-    u32 SUBOP10_2 : 10;
-    u32 RB_5 : 5;
-    u32 RA_5 : 5;
-    u32 L_4 : 1;
-    u32 : 1;
-    u32 CRFD_4 : 3;
-    u32 OPCD_B : 6;
-  };
-  struct
-  {
-    u32 : 16;
-    // Segment register
-    u32 SR : 4;
-    u32 : 1;
-    u32 RS_2 : 5;
-    u32 OPCD_C : 6;
-  };
+
+  // Primary opcode
+  BitField<26, 6, u32> OPCD;
+  // Destination GPR
+  BitField<21, 5, u32> RD;
+  // Source or destination GPR
+  BitField<16, 5, u32> RA;
+  // Source GPR
+  BitField<11, 5, u32> RB;
+  BitField<1, 10, u32> SUBOP10;
+  // Record bit — 1 if the condition register should be updated
+  BitField<0, 1, u32> Rc;
+
+  // Immediate, signed 16-bit
+  BitField<0, 16, s32> SIMM_16;
+  // Conditions on which to trap
+  BitField<21, 5, u32> TO;
+
+  BitField<0, 1, u32> Rc_2;
+  // Source GPR
+  BitField<21, 5, u32> RS;
+
+  // Immediate, unsigned 16-bit
+  BitField<0, 16, u32> UIMM;
+
+  // Link bit — 1 if branch should put next address into LR
+  BitField<0, 1, u32> LK;
+  // Absolute address bit — 1 if the immediate field represents an absolute address
+  BitField<1, 1, u32> AA;
+  // Immediate, signed 24-bit
+  BitField<2, 24, u32> LI;
+
+  BitField<0, 1, u32> LK_2;
+  BitField<1, 1, u32> AA_2;
+  // Branch displacement, signed 14-bit (right-extended by 0b00)
+  BitField<2, 14, s32> BD;
+  // Branch condition
+  BitField<16, 5, u32> BI;
+  // Conditional branch control
+  BitField<21, 5, u32> BO;
+
+  BitField<0, 1, u32> LK_3;
+  BitField<1, 10, u32> XO;
+  BitField<16, 5, u32> BI_2;
+  BitField<21, 5, u32> BO_2;
+
+  BitField<11, 5, u32> RB_2;
+  BitField<16, 5, u32> RA_2;
+  BitField<21, 1, u32> L;
+  // Destination field in CR or FPSCR
+  BitField<23, 3, u32> CRFD;
+
+  BitField<0, 16, s32> SIMM_16_2;
+  BitField<16, 5, u32> RA_3;
+  BitField<21, 1, u32> L_2;
+  BitField<23, 3, u32> CRFD_2;
+
+  BitField<0, 16, u32> UIMM_2;
+  BitField<16, 5, u32> RA_4;
+  BitField<21, 1, u32> L_3;
+  BitField<23, 3, u32> CRFD_3;
+
+  BitField<1, 10, u32> SUBOP10_2;
+  BitField<11, 5, u32> RB_5;
+  BitField<16, 5, u32> RA_5;
+  BitField<21, 1, u32> L_4;
+  BitField<23, 3, u32> CRFD_4;
+
+  // Segment register
+  BitField<16, 4, u32> SR;
+  BitField<21, 5, u32> RS_2;
 
   // Table 59
-  struct
-  {
-    u32 Rc_4 : 1;
-    u32 SUBOP5 : 5;
-    // ?
-    u32 RC : 5;
-    u32 : 5;
-    u32 RA_6 : 5;
-    u32 RD_2 : 5;
-    u32 OPCD_D : 6;
-  };
+  BitField<0, 1, u32> Rc_4;
+  BitField<1, 5, u32> SUBOP5;
+  BitField<6, 5, u32> RC;
+  BitField<11, 5, u32> RA_6;
+  BitField<16, 5, u32> RD_2;
 
-  struct
-  {
-    u32 : 10;
-    // Overflow enable
-    u32 OE : 1;
-    // Special-purpose register
-    u32 SPR : 10;
-    u32 : 11;
-  };
-  struct
-  {
-    u32 : 10;
-    u32 OE_3 : 1;
-    // Upper special-purpose register
-    u32 SPRU : 5;
-    // Lower special-purpose register
-    u32 SPRL : 5;
-    u32 : 11;
-  };
+  // Overflow enable
+  BitField<10, 1, u32> OE;
+  // Special-purpose register
+  BitField<11, 10, u32> SPR;
 
-  // rlwinmx
-  struct
-  {
-    u32 Rc_3 : 1;
-    // Mask end
-    u32 ME : 5;
-    // Mask begin
-    u32 MB : 5;
-    // Shift amount
-    u32 SH : 5;
-    u32 : 16;
-  };
+  BitField<10, 1, u32> OE_3;
+  // Upper special-purpose register
+  BitField<11, 5, u32> SPRU;
+  // Lower special-purpose register
+  BitField<16, 5, u32> SPRL;
+
+  // rlwinm*
+  BitField<0, 1, u32> Rc_3;
+  // Mask end
+  BitField<1, 5, u32> ME;
+  // Mask begin
+  BitField<6, 5, u32> MB;
+  // Shift amount
+  BitField<11, 5, u32> SH;
 
   // crxor
-  struct
-  {
-    u32 : 11;
-    // Source bit in the CR
-    u32 CRBB : 5;
-    // Source bit in the CR
-    u32 CRBA : 5;
-    // Destination bit in the CR
-    u32 CRBD : 5;
-    u32 : 6;
-  };
+  // Source bit in the CR
+  BitField<11, 5, u32> CRBB;
+  // Source bit in the CR
+  BitField<16, 5, u32> CRBA;
+  // Destination bit in the CR
+  BitField<21, 5, u32> CRBD;
 
   // mftb
-  struct
-  {
-    u32 : 11;
-    // Time base register
-    u32 TBR : 10;
-    u32 : 11;
-  };
+  // Time base register
+  BitField<11, 10, u32> TBR;
+  // Upper time base register
+  BitField<11, 5, u32> TBRU;
+  // Lower time base register
+  BitField<16, 5, u32> TBRL;
 
-  struct
-  {
-    u32 : 11;
-    // Upper time base register
-    u32 TBRU : 5;
-    // Lower time base register
-    u32 TBRL : 5;
-    u32 : 11;
-  };
+  // Source field in the CR or FPSCR
+  BitField<18, 3, u32> CRFS;
+  BitField<23, 3, u32> CRFD_5;
 
-  struct
-  {
-    u32 : 18;
-    // Source field in the CR or FPSCR
-    u32 CRFS : 3;
-    u32 : 2;
-    u32 CRFD_5 : 3;
-    u32 : 6;
-  };
+  // Field mask, identifies the CR fields to be updated by mtcrf
+  BitField<12, 8, u32> CRM;
+  // Destination FPR
+  BitField<21, 5, u32> FD;
 
-  struct
-  {
-    u32 : 12;
-    // Field mask, identifies the CR fields to be updated by mtcrf
-    u32 CRM : 8;
-    u32 : 1;
-    // Destination FPR
-    u32 FD : 5;
-    u32 : 6;
-  };
-  struct
-  {
-    u32 : 6;
-    // Source FPR
-    u32 FC : 5;
-    // Source FPR
-    u32 FB : 5;
-    // Source FPR
-    u32 FA : 5;
-    // Source FPR
-    u32 FS : 5;
-    u32 : 6;
-  };
-  struct
-  {
-    u32 : 17;
-    // Field mask, identifies the FPSCR fields to be updated by mtfsf
-    u32 FM : 8;
-    u32 : 7;
-  };
+  // Source FPRs
+  BitField<6, 5, u32> FC;
+  BitField<11, 5, u32> FB;
+  BitField<16, 5, u32> FA;
+  BitField<21, 5, u32> FS;
+
+  // Field mask, identifies the FPSCR fields to be updated by mtfsf
+  BitField<17, 8, u32> FM;
 
   // paired single quantized load/store
-  struct
-  {
-    u32 : 1;
-    u32 SUBOP6 : 6;
-    // Graphics quantization register to use
-    u32 Ix : 3;
-    // 0: paired single, 1: scalar
-    u32 Wx : 1;
-    u32 : 1;
-    // Graphics quantization register to use
-    u32 I : 3;
-    // 0: paired single, 1: scalar
-    u32 W : 1;
-    u32 : 16;
-  };
+  BitField<1, 6, u32> SUBOP6;
+  // Graphics quantization register to use
+  BitField<7, 3, u32> Ix;
+  BitField<10, 1, u32> Wx;
+  // Graphics quantization register to use
+  BitField<12, 3, u32> I;
+  BitField<15, 1, u32> W;
 
-  struct
-  {
-    signed SIMM_12 : 12;
-    u32 : 20;
-  };
+  BitField<0, 12, s32> SIMM_12;
 
-  struct
-  {
-    u32 : 11;
-    // Number of bytes to use in lswi/stswi (0 means 32 bytes)
-    u32 NB : 5;
-  };
+  // Number of bytes to use in lswi/stswi (0 means 32 bytes)
+  BitField<11, 5, u32> NB;
 };
 
 // Precondition: inst is a bx, bcx, bclrx, or bcctrx instruction.

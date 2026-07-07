@@ -398,14 +398,13 @@ void PowerPCManager::RunLoop()
 
 u64 PowerPCManager::ReadFullTimeBaseValue() const
 {
-  u64 value;
-  std::memcpy(&value, &TL(m_ppc_state), sizeof(value));
-  return value;
+  return (static_cast<u64>(TU(m_ppc_state)) << 32) | TL(m_ppc_state);
 }
 
 void PowerPCManager::WriteFullTimeBaseValue(u64 value)
 {
-  std::memcpy(&TL(m_ppc_state), &value, sizeof(value));
+  TL(m_ppc_state) = static_cast<u32>(value);
+  TU(m_ppc_state) = static_cast<u32>(value >> 32);
 }
 
 void UpdatePerformanceMonitor(u32 cycles, u32 num_load_stores, u32 num_fp_inst,

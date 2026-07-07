@@ -528,7 +528,7 @@ std::pair<s16, s16> ASndUCode::ReadSampleMono16BitsLittleEndian() const
   // mono_16bits_le
   const u32 index = (m_current_voice.start_addr >> 1) & INPUT_SAMPLE_BUFFER_WORD_MASK;
   // Actual implementation is u32 result_l = result | result << 16; result = result_l >> 8;
-  const s16 result = Common::swap16(m_input_sample_buffer[index]);
+  const s16 result = Common::FromBigEndian(m_input_sample_buffer[index]);
   return {result, result};
 }
 
@@ -546,11 +546,11 @@ std::pair<s16, s16> ASndUCode::ReadSampleStereo16BitsLittleEndian() const
 {
   // stereo_16bits_le
   const u32 index = (m_current_voice.start_addr >> 1) & INPUT_SAMPLE_BUFFER_WORD_MASK;
-  const s16 right = Common::swap16(m_input_sample_buffer[index]);
+  const s16 right = Common::FromBigEndian(m_input_sample_buffer[index]);
   // Note that 1 is added to index after the masking - meaning that theoretically an out-of-bounds
   // index 0x10 can be read (but the buffer is oversized both here and in the actual uCode, so the
   // data at the out-of-bounds index will instead be 0).
-  const s16 left = Common::swap16(m_input_sample_buffer[index + 1]);
+  const s16 left = Common::FromBigEndian(m_input_sample_buffer[index + 1]);
   return {right, left};
 }
 

@@ -217,6 +217,8 @@ std::unique_ptr<BlobReader> CreateBlobReader(const std::string& filename)
   if (!file.Read(Common::AsWritableU8Span(magic)))
     return nullptr;
 
+  magic = Common::FromLittleEndian(magic);
+
   // Conveniently, every supported file format (except for plain disc images and
   // extracted discs) starts with a 4-byte magic number that identifies the format,
   // so we just need a simple switch statement to create the right blob type. If the

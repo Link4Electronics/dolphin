@@ -901,7 +901,7 @@ void BranchWatchDialog::OnTableInvertCondition() const
 {
   SetEditPatches([](u32 hex) {
     UGeckoInstruction inst = hex;
-    inst.BO ^= 0b01000;
+    inst.BO = u32(inst.BO) ^ 0b01000;
     return inst.hex;
   });
 }
@@ -910,7 +910,7 @@ void BranchWatchDialog::OnTableInvertDecrementCheck() const
 {
   SetEditPatches([](u32 hex) {
     UGeckoInstruction inst = hex;
-    inst.BO ^= 0b00010;
+    inst.BO = u32(inst.BO) ^ 0b00010;
     return inst.hex;
   });
 }

@@ -63,9 +63,9 @@ static inline u32 DecodePixel_Paletted(u16 pixel, TLUTFormat tlutfmt)
   case TLUTFormat::IA8:
     return DecodePixel_IA8(pixel);
   case TLUTFormat::RGB565:
-    return DecodePixel_RGB565(Common::swap16(pixel));
+    return DecodePixel_RGB565(Common::FromBigEndian(pixel));
   case TLUTFormat::RGB5A3:
-    return DecodePixel_RGB5A3(Common::swap16(pixel));
+    return DecodePixel_RGB5A3(Common::FromBigEndian(pixel));
   default:
     return 0;
   }
@@ -97,7 +97,7 @@ static inline void DecodeBytes_C14X2(u32* dst, const u16* src, const u8* tlut_, 
   const u16* tlut = (u16*)tlut_;
   for (int x = 0; x < 4; x++)
   {
-    u16 val = Common::swap16(src[x]);
+    u16 val = Common::FromBigEndian(src[x]);
     *dst++ = DecodePixel_Paletted(tlut[(val & 0x3FFF)], tlutfmt);
   }
 }
@@ -116,7 +116,7 @@ static inline void DecodeBytes_IA4(u32* dst, const u8* src)
 static inline void DecodeBytes_RGB5A3(u32* dst, const u16* src)
 {
   for (int x = 0; x < 4; x++)
-    dst[x] = DecodePixel_RGB5A3(Common::swap16(src[x]));
+    dst[x] = DecodePixel_RGB5A3(Common::FromBigEndian(src[x]));
 }
 
 static inline void DecodeBytes_RGBA8(u32* dst, const u16* src, const u16* src2)
@@ -129,8 +129,8 @@ static void DecodeDXTBlock(u32* dst, const DXTBlock* src, int pitch)
 {
   // S3TC Decoder (Note: GCN decodes differently from PC so we can't use native support)
   // Needs more speed.
-  u16 c1 = Common::swap16(src->color1);
-  u16 c2 = Common::swap16(src->color2);
+  u16 c1 = Common::FromBigEndian(src->color1);
+  u16 c2 = Common::FromBigEndian(src->color2);
   int blue1 = Convert5To8(c1 & 0x1F);
   int blue2 = Convert5To8(c2 & 0x1F);
   int green1 = Convert6To8((c1 >> 5) & 0x3F);
@@ -284,7 +284,7 @@ void _TexDecoder_DecodeImpl(u32* dst, const u8* src, int width, int height, Text
           u32* ptr = dst + (y + iy) * width + x;
           u16* s = (u16*)src;
           for (int j = 0; j < 4; j++)
-            *ptr++ = DecodePixel_RGB565(Common::swap16(*s++));
+            *ptr++ = DecodePixel_RGB565(Common::FromBigEndian(*s++));
         }
   }
   break;

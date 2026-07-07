@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <bit>
 #include <cstring>
 #include <type_traits>
 
@@ -176,12 +177,53 @@ inline void swap<8>(u8* data)
 }
 
 template <typename T>
+  requires std::is_arithmetic_v<T>
 inline T FromBigEndian(T data)
 {
-  static_assert(std::is_arithmetic<T>::value, "function only makes sense with arithmetic types");
-
-  swap<sizeof(data)>(reinterpret_cast<u8*>(&data));
+  if constexpr (std::endian::native == std::endian::little)
+    swap<sizeof(data)>(reinterpret_cast<u8*>(&data));
   return data;
+}
+
+template <typename T>
+  requires std::is_arithmetic_v<T>
+inline T FromLittleEndian(T data)
+{
+  if constexpr (std::endian::native == std::endian::big)
+    swap<sizeof(data)>(reinterpret_cast<u8*>(&data));
+  return data;
+}
+
+template <typename T>
+  requires std::is_arithmetic_v<T>
+inline T ToBigEndian(T data)
+{
+  if constexpr (std::endian::native == std::endian::little)
+    swap<sizeof(data)>(reinterpret_cast<u8*>(&data));
+  return data;
+}
+
+template <typename T>
+  requires std::is_arithmetic_v<T>
+inline T ToLittleEndian(T data)
+{
+  if constexpr (std::endian::native == std::endian::big)
+    swap<sizeof(data)>(reinterpret_cast<u8*>(&data));
+  return data;
+}
+
+inline u32 FromBigEndian(const u8* data)
+{
+  u32 value;
+  std::memcpy(&value, data, sizeof(u32));
+  return FromBigEndian(value);
+}
+
+inline u32 FromLittleEndian(const u8* data)
+{
+  u32 value;
+  std::memcpy(&value, data, sizeof(u32));
+  return FromLittleEndian(value);
 }
 
 template <typename value_type>

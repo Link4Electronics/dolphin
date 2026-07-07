@@ -136,6 +136,9 @@ void ProcessorInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
   mmio->Register(base | PI_FLIPPER_REV, MMIO::Constant<u32>(FLIPPER_REV_C),
                  MMIO::InvalidWrite<u32>());
 
+  mmio->Register(base | PI_FLIPPER_UNK, MMIO::Constant<u32>(0x0245248A),
+                 MMIO::Nop<u32>());
+
   // 16 bit reads are based on 32 bit reads.
   for (u32 i = 0; i < 0x1000; i += 4)
   {

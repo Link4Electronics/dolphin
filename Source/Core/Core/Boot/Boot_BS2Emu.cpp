@@ -298,6 +298,7 @@ bool CBoot::EmulatedBS2_GC(Core::System& system, const Core::CPUThreadGuard& gua
   SetupBAT(system, /*is_wii*/ false);
 
   SetupGCMemory(system, guard);
+  CopyDefaultExceptionHandlers(system);
 
   // Datel titles don't initialize the postMatrices, but they have dual-texture coordinate
   // transformation enabled. We initialize all of xfmem to 0, which results in everything using
@@ -604,9 +605,7 @@ bool CBoot::EmulatedBS2_Wii(Core::System& system, const Core::CPUThreadGuard& gu
   SetupHID(ppc_state, /*is_wii*/ true);
   SetupBAT(system, /*is_wii*/ true);
 
-  memory.Write_U32(0x4c000064, 0x00000300);  // Write default DSI Handler:   rfi
-  memory.Write_U32(0x4c000064, 0x00000800);  // Write default FPU Handler:   rfi
-  memory.Write_U32(0x4c000064, 0x00000C00);  // Write default Syscall Handler: rfi
+  CopyDefaultExceptionHandlers(system);
 
   ppc_state.gpr[1] = 0x816ffff0;  // StackPointer
 

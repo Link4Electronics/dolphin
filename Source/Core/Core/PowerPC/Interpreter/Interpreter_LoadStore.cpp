@@ -970,7 +970,7 @@ void Interpreter::stswi(Interpreter& interpreter, UGeckoInstruction inst)
     return;
   }
 
-  Helper_StoreString(interpreter, EA, inst.NB == 0 ? 32 : inst.NB, inst.RS);
+  Helper_StoreString(interpreter, EA, inst.NB == 0 ? 32 : u32(inst.NB), inst.RS);
 }
 
 void Interpreter::stswx(Interpreter& interpreter, UGeckoInstruction inst)

@@ -92,9 +92,15 @@ union UVIVerticalTimingRegister
   u16 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 : 2;
+    u16 ACV : 10;  // Active video in lines per field (seems always zero)
+    u16 EQU : 4;   // Equalization pulse in half lines
+#else
     u16 EQU : 4;   // Equalization pulse in half lines
     u16 ACV : 10;  // Active video in lines per field (seems always zero)
     u16 : 2;
+#endif
   };
 
   UVIVerticalTimingRegister() = default;
@@ -106,6 +112,17 @@ union UVIDisplayControlRegister
   u16 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 : 6;
+    u16 FMT : 2;  // 0: NTSC, 1: PAL, 2: MPAL, 3: Debug
+    u16 LE1 : 2;
+    u16 LE0 : 2;  // Display Latch; 0: Off, 1: On for 1 field, 2: On for 2 fields, 3: Always on
+    u16 DLR : 1;  // Selects 3D Display Mode
+    u16 NIN : 1;  // 0: Interlaced, 1: Non-Interlaced: top field drawn at field rate and bottom
+                  // field is not displayed
+    u16 RST : 1;  // Clears all data requests and puts VI into its idle state
+    u16 ENB : 1;  // Enables video timing generation and data request
+#else
     u16 ENB : 1;  // Enables video timing generation and data request
     u16 RST : 1;  // Clears all data requests and puts VI into its idle state
     u16 NIN : 1;  // 0: Interlaced, 1: Non-Interlaced: top field drawn at field rate and bottom
@@ -115,6 +132,7 @@ union UVIDisplayControlRegister
     u16 LE1 : 2;
     u16 FMT : 2;  // 0: NTSC, 1: PAL, 2: MPAL, 3: Debug
     u16 : 6;
+#endif
   };
 
   UVIDisplayControlRegister() = default;
@@ -126,16 +144,29 @@ union UVIHorizontalTiming0
   u32 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 Hi, Lo;
+#else
     u16 Lo, Hi;
+#endif
   };
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u32 : 1;
+    u32 HCS : 7;  // Horizontal Sync Start to Color Burst Start
+    u32 : 1;
+    u32 HCE : 7;  // Horizontal Sync Start to Color Burst End
+    u32 : 6;
+    u32 HLW : 10;  // Halfline Width (W*16 = Width (720))
+#else
     u32 HLW : 10;  // Halfline Width (W*16 = Width (720))
     u32 : 6;
     u32 HCE : 7;  // Horizontal Sync Start to Color Burst End
     u32 : 1;
     u32 HCS : 7;  // Horizontal Sync Start to Color Burst Start
     u32 : 1;
+#endif
   };
 };
 
@@ -144,14 +175,25 @@ union UVIHorizontalTiming1
   u32 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 Hi, Lo;
+#else
     u16 Lo, Hi;
+#endif
   };
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u32 : 5;
+    u32 HBS640 : 10;  // Half line to horizontal blanking start
+    u32 HBE640 : 10;  // Horizontal Sync Start to horizontal blank end
+    u32 HSY : 7;      // Horizontal Sync Width
+#else
     u32 HSY : 7;      // Horizontal Sync Width
     u32 HBE640 : 10;  // Horizontal Sync Start to horizontal blank end
     u32 HBS640 : 10;  // Half line to horizontal blanking start
     u32 : 5;
+#endif
   };
 };
 
@@ -161,14 +203,25 @@ union UVIVBlankTimingRegister
   u32 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 Hi, Lo;
+#else
     u16 Lo, Hi;
+#endif
   };
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u32 : 6;
+    u32 PSB : 10;  // Post blanking in half lines
+    u32 : 6;
+    u32 PRB : 10;  // Pre-blanking in half lines
+#else
     u32 PRB : 10;  // Pre-blanking in half lines
     u32 : 6;
     u32 PSB : 10;  // Post blanking in half lines
     u32 : 6;
+#endif
   };
 };
 
@@ -178,14 +231,25 @@ union UVIBurstBlankingRegister
   u32 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 Hi, Lo;
+#else
     u16 Lo, Hi;
+#endif
   };
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u32 BE2 : 11;  // Field x+2 start to burst blanking end in halflines
+    u32 BS2 : 5;   // Field x+2 start to burst blanking start in halflines
+    u32 BE0 : 11;  // Field x start to burst blanking end in halflines
+    u32 BS0 : 5;   // Field x start to burst blanking start in halflines
+#else
     u32 BS0 : 5;   // Field x start to burst blanking start in halflines
     u32 BE0 : 11;  // Field x start to burst blanking end in halflines
     u32 BS2 : 5;   // Field x+2 start to burst blanking start in halflines
     u32 BE2 : 11;  // Field x+2 start to burst blanking end in halflines
+#endif
   };
 };
 
@@ -194,10 +258,21 @@ union UVIFBInfoRegister
   u32 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 Hi, Lo;
+#else
     u16 Lo, Hi;
+#endif
   };
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u32 CLRPOFF : 3;  // ? setting bit 31 clears POFF
+    u32 POFF : 1;     // Page offset: 1: fb address is (address>>5)
+    u32 XOFF : 4;     // Horizontal Offset of the left-most pixel within the first word of the
+                      // fetched picture
+    u32 FBB : 24;     // Base address of the framebuffer in external mem
+#else
     // TODO: mask out lower 9bits/align to 9bits???
     u32 FBB : 24;  // Base address of the framebuffer in external mem
     // POFF only seems to exist in the top reg. XOFF, unknown.
@@ -205,6 +280,7 @@ union UVIFBInfoRegister
                    // picture
     u32 POFF : 1;  // Page offset: 1: fb address is (address>>5)
     u32 CLRPOFF : 3;  // ? setting bit 31 clears POFF
+#endif
   };
 };
 
@@ -214,10 +290,23 @@ union UVIInterruptRegister
   u32 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 Hi, Lo;
+#else
     u16 Lo, Hi;
+#endif
   };
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u32 IR_INT : 1;  // Interrupt Status (1=Active, 0=Clear)
+    u32 : 2;
+    u32 IR_MASK : 1;  // Interrupt Mask Bit
+    u32 : 1;
+    u32 VCT : 11;  // Vertical Position
+    u32 : 5;
+    u32 HCT : 11;  // Horizontal Position
+#else
     u32 HCT : 11;  // Horizontal Position
     u32 : 5;
     u32 VCT : 11;  // Vertical Position
@@ -225,6 +314,7 @@ union UVIInterruptRegister
     u32 IR_MASK : 1;  // Interrupt Mask Bit
     u32 : 2;
     u32 IR_INT : 1;  // Interrupt Status (1=Active, 0=Clear)
+#endif
   };
 };
 
@@ -233,15 +323,27 @@ union UVILatchRegister
   u32 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 Hi, Lo;
+#else
     u16 Lo, Hi;
+#endif
   };
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u32 TRG : 1;  // Trigger Flag
+    u32 : 4;
+    u32 VCT : 11;  // Vertical Count
+    u32 : 5;
+    u32 HCT : 11;  // Horizontal Count
+#else
     u32 HCT : 11;  // Horizontal Count
     u32 : 5;
     u32 VCT : 11;  // Vertical Count
     u32 : 4;
     u32 TRG : 1;  // Trigger Flag
+#endif
   };
 };
 
@@ -250,9 +352,15 @@ union PictureConfigurationRegister
   u16 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 : 1;
+    u16 WPL : 7;
+    u16 STD : 8;
+#else
     u16 STD : 8;
     u16 WPL : 7;
     u16 : 1;
+#endif
   };
 };
 
@@ -261,10 +369,17 @@ union UVIHorizontalScaling
   u16 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 : 3;
+    u16 HS_EN : 1;  // Enable Horizontal Scaling
+    u16 : 3;
+    u16 STP : 9;  // Horizontal stepping size (U1.8 Scaler Value) (0x160 Works for 320)
+#else
     u16 STP : 9;  // Horizontal stepping size (U1.8 Scaler Value) (0x160 Works for 320)
     u16 : 3;
     u16 HS_EN : 1;  // Enable Horizontal Scaling
     u16 : 3;
+#endif
   };
 
   UVIHorizontalScaling() = default;
@@ -277,14 +392,25 @@ union UVIFilterCoefTable3
   u32 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 Hi, Lo;
+#else
     u16 Lo, Hi;
+#endif
   };
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u32 : 2;
+    u32 Tap2 : 10;
+    u32 Tap1 : 10;
+    u32 Tap0 : 10;
+#else
     u32 Tap0 : 10;
     u32 Tap1 : 10;
     u32 Tap2 : 10;
     u32 : 2;
+#endif
   };
 };
 
@@ -294,14 +420,25 @@ union UVIFilterCoefTable4
   u32 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 Hi, Lo;
+#else
     u16 Lo, Hi;
+#endif
   };
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u32 Tap3 : 8;
+    u32 Tap2 : 8;
+    u32 Tap1 : 8;
+    u32 Tap0 : 8;
+#else
     u32 Tap0 : 8;
     u32 Tap1 : 8;
     u32 Tap2 : 8;
     u32 Tap3 : 8;
+#endif
   };
 };
 
@@ -317,14 +454,25 @@ union UVIBorderBlankRegister
   u32 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 Hi, Lo;
+#else
     u16 Lo, Hi;
+#endif
   };
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u32 BRDR_EN : 1;  // Border Enable
+    u32 HBS656 : 10;  // Border Horizontal Blank start
+    u32 : 11;
+    u32 HBE656 : 10;  // Border Horizontal Blank End
+#else
     u32 HBE656 : 10;  // Border Horizontal Blank End
     u32 : 11;
     u32 HBS656 : 10;  // Border Horizontal Blank start
     u32 BRDR_EN : 1;  // Border Enable
+#endif
   };
 };
 
@@ -334,9 +482,15 @@ union UVIDTVStatus
   u16 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 : 14;
+    u16 ntsc_j : 1;
+    u16 component_plugged : 1;
+#else
     u16 component_plugged : 1;
     u16 ntsc_j : 1;
     u16 : 14;
+#endif
   };
 };
 
@@ -345,8 +499,13 @@ union UVIHorizontalStepping
   u16 Hex = 0;
   struct
   {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    u16 : 6;
+    u16 srcwidth : 10;
+#else
     u16 srcwidth : 10;
     u16 : 6;
+#endif
   };
 };
 

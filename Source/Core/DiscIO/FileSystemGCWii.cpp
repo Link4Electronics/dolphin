@@ -78,8 +78,8 @@ FileInfo::const_iterator FileInfoGCWii::end() const
 
 u32 FileInfoGCWii::Get(EntryProperty entry_property) const
 {
-  return Common::swap32(m_fst + FST_ENTRY_SIZE * m_index +
-                        sizeof(u32) * static_cast<int>(entry_property));
+  return Common::FromBigEndian(m_fst + FST_ENTRY_SIZE * m_index +
+                               sizeof(u32) * static_cast<int>(entry_property));
 }
 
 u32 FileInfoGCWii::GetSize() const

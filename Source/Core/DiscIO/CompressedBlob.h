@@ -1,7 +1,7 @@
 // Copyright 2008 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// WARNING Code not big-endian safe.
+// Big-endian safe as of June 2026 (all fields byteswapped via FromLittleEndian/FromBigEndian).
 
 // To create new compressed BLOBs, use CompressFileToBlob.
 

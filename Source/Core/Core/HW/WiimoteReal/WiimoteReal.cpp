@@ -382,10 +382,10 @@ bool Wiimote::IsBalanceBoard()
     case InputReportID::ReadDataReply:
     {
       const auto* reply = reinterpret_cast<InputReportReadDataReply*>(&buf[2]);
-      if (Common::swap16(reply->address) != 0x00fe)
+      if (Common::FromLittleEndian(reply->address) != 0x00fe)
       {
         ERROR_LOG_FMT(WIIMOTE, "IsBalanceBoard(): Received unexpected data reply for address {:X}",
-                      Common::swap16(reply->address));
+                      Common::FromLittleEndian(reply->address));
         return false;
       }
       // A Balance Board ext can be identified by checking for 0x0402.

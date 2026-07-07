@@ -382,7 +382,7 @@ u32 InstructionCache::ReadInstruction(Memory::MemoryManager& memory,
 
   u32 value;
   Read(memory, addr, &value, sizeof(value), HID0(ppc_state).ILOCK);
-  return Common::swap32(value);
+  return Common::FromBigEndian(value);
 }
 
 void InstructionCache::Invalidate(Memory::MemoryManager& memory, JitInterface& jit_interface,

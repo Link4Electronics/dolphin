@@ -69,6 +69,18 @@ private:
     explicit AICR(u32 hex_) : hex{hex_} {}
     struct
     {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      u32 : 25;
+      u32 AIDFR : 1;     // AID Frequency (0=48khz 1=32khz)
+      u32 SCRESET : 1;   // write to reset counter
+      u32 AIINTVLD : 1;  // This bit controls whether AIINT is affected by the Interrupt Timing
+                         // register
+                         // matching the sample counter. Once set, AIINT will hold its last value
+      u32 AIINT : 1;     // audio interrupt status
+      u32 AIINTMSK : 1;  // 0=interrupt masked 1=interrupt enabled
+      u32 AISFR : 1;     // AIS Frequency (0=32khz 1=48khz)
+      u32 PSTAT : 1;     // sample counter/playback enable
+#else
       u32 PSTAT : 1;     // sample counter/playback enable
       u32 AISFR : 1;     // AIS Frequency (0=32khz 1=48khz)
       u32 AIINTMSK : 1;  // 0=interrupt masked 1=interrupt enabled
@@ -79,6 +91,7 @@ private:
       u32 SCRESET : 1;   // write to reset counter
       u32 AIDFR : 1;     // AID Frequency (0=48khz 1=32khz)
       u32 : 25;
+#endif
     };
     u32 hex = 0;
   };
@@ -88,9 +101,15 @@ private:
   {
     struct
     {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      u32 : 16;
+      u32 right : 8;
+      u32 left : 8;
+#else
       u32 left : 8;
       u32 right : 8;
       u32 : 16;
+#endif
     };
     u32 hex = 0;
   };

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <span>
 
@@ -304,6 +305,13 @@ void TexDecoder_Decode(u8* dst, const u8* src, int width, int height, TextureFor
 
   if (TexFmt_Overlay_Enable)
     TexDecoder_DrawOverlay(dst, width, height, texformat);
+
+  if constexpr (std::endian::native == std::endian::big)
+  {
+    u32* pixels = reinterpret_cast<u32*>(dst);
+    for (int i = 0; i < width * height; i++)
+      pixels[i] = Common::swap32(pixels[i]);
+  }
 }
 
 static inline u32 DecodePixel_IA8(u16 val)
@@ -350,9 +358,9 @@ static inline u32 DecodePixel_Paletted(u16 pixel, TLUTFormat tlutfmt)
   case TLUTFormat::IA8:
     return DecodePixel_IA8(pixel);
   case TLUTFormat::RGB565:
-    return DecodePixel_RGB565(Common::swap16(pixel));
+    return DecodePixel_RGB565(Common::FromBigEndian(pixel));
   case TLUTFormat::RGB5A3:
-    return DecodePixel_RGB5A3(Common::swap16(pixel));
+    return DecodePixel_RGB5A3(Common::FromBigEndian(pixel));
   default:
     return 0;
   }
@@ -493,7 +501,7 @@ void TexDecoder_DecodeTexel(u8* dst, std::span<const u8> src, int s, int t, int 
     u32 blkOff = (blkT << 2) + blkS;
 
     u32 offset = (base + blkOff) << 1;
-    u16 val = Common::swap16(Common::SafeSpanRead<u16>(src, offset)) & 0x3FFF;
+    u16 val = Common::FromBigEndian(Common::SafeSpanRead<u16>(src, offset)) & 0x3FFF;
     u16 pixel = Common::SafeSpanRead<u16>(tlut_, sizeof(u16) * val);
 
     *((u32*)dst) = DecodePixel_Paletted(pixel, tlutfmt);
@@ -512,7 +520,7 @@ void TexDecoder_DecodeTexel(u8* dst, std::span<const u8> src, int s, int t, int 
     u32 offset = (base + blkOff) << 1;
     u16 val = Common::SafeSpanRead<u16>(src, offset);
 
-    *((u32*)dst) = DecodePixel_RGB565(Common::swap16(val));
+    *((u32*)dst) = DecodePixel_RGB565(Common::FromBigEndian(val));
   }
   break;
   case TextureFormat::RGB5A3:
@@ -528,7 +536,7 @@ void TexDecoder_DecodeTexel(u8* dst, std::span<const u8> src, int s, int t, int 
     u32 offset = (base + blkOff) << 1;
     u16 val = Common::SafeSpanRead<u16>(src, offset);
 
-    *((u32*)dst) = DecodePixel_RGB5A3(Common::swap16(val));
+    *((u32*)dst) = DecodePixel_RGB5A3(Common::FromBigEndian(val));
   }
   break;
   case TextureFormat::RGBA8:
@@ -566,8 +574,8 @@ void TexDecoder_DecodeTexel(u8* dst, std::span<const u8> src, int s, int t, int 
 
     DXTBlock dxtBlock = Common::SafeSpanRead<DXTBlock>(src, offset);
 
-    u16 c1 = Common::swap16(dxtBlock.color1);
-    u16 c2 = Common::swap16(dxtBlock.color2);
+    u16 c1 = Common::FromBigEndian(dxtBlock.color1);
+    u16 c2 = Common::FromBigEndian(dxtBlock.color2);
     int blue1 = Convert5To8(c1 & 0x1F);
     int blue2 = Convert5To8(c2 & 0x1F);
     int green1 = Convert6To8((c1 >> 5) & 0x3F);

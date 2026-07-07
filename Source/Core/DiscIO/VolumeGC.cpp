@@ -15,6 +15,7 @@
 #include "Common/CommonTypes.h"
 #include "Common/Crypto/SHA1.h"
 #include "Common/Logging/Log.h"
+#include "Common/Swap.h"
 
 #include "DiscIO/Blob.h"
 #include "DiscIO/DiscExtractor.h"
@@ -47,7 +48,7 @@ VolumeGC::VolumeGC(std::unique_ptr<BlobReader> reader)
       return;
     const u64 file_size = ReadFile(*this, PARTITION_NONE, file_info.get(),
                                    reinterpret_cast<u8*>(&m_triforce_header), sizeof(BootID));
-    if (file_size >= 4 && m_triforce_header.magic == BTID_MAGIC)
+    if (file_size >= 4 && Common::FromLittleEndian(m_triforce_header.magic) == BTID_MAGIC)
     {
       m_is_triforce = true;
     }
@@ -92,7 +93,8 @@ Region VolumeGC::GetRegion() const
 {
   if (m_is_triforce)
   {
-    switch (m_triforce_header.region_flags & 0x000000FF)
+    const u8 region_byte = reinterpret_cast<const u8*>(&m_triforce_header.region_flags)[0];
+    switch (region_byte)
     {
     default:
     case 0x02:  // JAPAN
@@ -207,17 +209,18 @@ VolumeGC::ConvertedGCBanner VolumeGC::LoadBannerFile() const
   constexpr u32 BNR1_MAGIC = 0x31524e42;
   constexpr u32 BNR2_MAGIC = 0x32524e42;
   bool is_bnr1;
-  if (banner_file.id == BNR1_MAGIC && file_size == BNR1_SIZE)
+  const u32 banner_magic = Common::FromLittleEndian(banner_file.id);
+  if (banner_magic == BNR1_MAGIC && file_size == BNR1_SIZE)
   {
     is_bnr1 = true;
   }
-  else if (banner_file.id == BNR2_MAGIC && file_size == BNR2_SIZE)
+  else if (banner_magic == BNR2_MAGIC && file_size == BNR2_SIZE)
   {
     is_bnr1 = false;
   }
   else
   {
-    WARN_LOG_FMT(DISCIO, "Invalid opening.bnr. Type: {:#0x} Size: {:#0x}", banner_file.id,
+    WARN_LOG_FMT(DISCIO, "Invalid opening.bnr. Type: {:#0x} Size: {:#0x}", banner_magic,
                  file_size);
     return {};
   }

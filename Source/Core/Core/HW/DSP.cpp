@@ -251,15 +251,19 @@ void DSPManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
   mmio->Register(
       base | DSP_CONTROL, MMIO::ComplexRead<u16>([](Core::System& system, u32) {
         auto& dsp = system.GetDSP();
-        return (dsp.m_dsp_control.Hex & ~DSP_CONTROL_MASK) |
-               (dsp.m_dsp_emulator->DSP_ReadControlRegister() & DSP_CONTROL_MASK);
+        return HostToGekko16((dsp.m_dsp_control.Hex & ~HostToGekko16(DSP_CONTROL_MASK)) |
+                             (dsp.m_dsp_emulator->DSP_ReadControlRegister() &
+                              HostToGekko16(DSP_CONTROL_MASK)));
       }),
       MMIO::ComplexWrite<u16>([](Core::System& system, u32, u16 val) {
         auto& dsp = system.GetDSP();
 
         UDSPControl tmpControl;
-        tmpControl.Hex = (val & ~DSP_CONTROL_MASK) |
-                         (dsp.m_dsp_emulator->DSP_WriteControlRegister(val) & DSP_CONTROL_MASK);
+        {
+          const u16 host_mask = HostToGekko16(DSP_CONTROL_MASK);
+          tmpControl.Hex = (HostToGekko16(val) & ~host_mask) |
+                           (dsp.m_dsp_emulator->DSP_WriteControlRegister(val) & host_mask);
+        }
 
         // Not really sure if this is correct, but it works...
         // Kind of a hack because DSP_CONTROL_MASK should make this bit
@@ -375,8 +379,9 @@ void DSPManager::UpdateInterrupts()
   // to the left of it. By doing:
   // (DSP_CONTROL>>1) & DSP_CONTROL & MASK_OF_ALL_INTERRUPT_BITS
   // We can check if any of the interrupts are enabled and active, all at once.
+  const u16 g_hex = m_dsp_control.GekkoHex();
   bool ints_set =
-      (((m_dsp_control.Hex >> 1) & m_dsp_control.Hex & (INT_DSP | INT_ARAM | INT_AID)) != 0);
+      (((g_hex >> 1) & g_hex & (INT_DSP | INT_ARAM | INT_AID)) != 0);
 
   m_system.GetProcessorInterface().SetInterrupt(ProcessorInterface::INT_CAUSE_DSP, ints_set);
 }
@@ -391,7 +396,11 @@ void DSPManager::GenerateDSPInterrupt(u64 DSPIntType, s64 cyclesLate)
   // The INT_* enumeration members have values that reflect their bit positions in
   // DSP_CONTROL - we mask by (INT_DSP | INT_ARAM | INT_AID) just to ensure people
   // don't call this with bogus values.
-  m_dsp_control.Hex |= (DSPIntType & (INT_DSP | INT_ARAM | INT_AID));
+  {
+    u16 g_hex = m_dsp_control.GekkoHex();
+    g_hex |= (DSPIntType & (INT_DSP | INT_ARAM | INT_AID));
+    m_dsp_control.Hex = HostToGekko16(g_hex);
+  }
   UpdateInterrupts();
 }
 
@@ -540,22 +549,22 @@ void DSPManager::Do_ARAM_DMA()
         if ((m_aram_info.Hex & 0xf) == 3)
         {
           *(u64*)&m_aram.ptr[m_aram_dma.ARAddr & m_aram.mask] =
-              Common::swap64(memory.Read_U64(m_aram_dma.MMAddr));
+              Common::ToBigEndian(memory.Read_U64(m_aram_dma.MMAddr));
         }
         else if ((m_aram_info.Hex & 0xf) == 4)
         {
           if (m_aram_dma.ARAddr < 0x400000)
           {
             *(u64*)&m_aram.ptr[(m_aram_dma.ARAddr + 0x400000) & m_aram.mask] =
-                Common::swap64(memory.Read_U64(m_aram_dma.MMAddr));
+                Common::ToBigEndian(memory.Read_U64(m_aram_dma.MMAddr));
           }
           *(u64*)&m_aram.ptr[m_aram_dma.ARAddr & m_aram.mask] =
-              Common::swap64(memory.Read_U64(m_aram_dma.MMAddr));
+              Common::ToBigEndian(memory.Read_U64(m_aram_dma.MMAddr));
         }
         else
         {
           *(u64*)&m_aram.ptr[m_aram_dma.ARAddr & m_aram.mask] =
-              Common::swap64(memory.Read_U64(m_aram_dma.MMAddr));
+              Common::ToBigEndian(memory.Read_U64(m_aram_dma.MMAddr));
         }
 
         m_aram_dma.MMAddr += 8;

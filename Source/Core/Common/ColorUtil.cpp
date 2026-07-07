@@ -1,6 +1,8 @@
 // Copyright 2009 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <bit>
+
 #include "Common/ColorUtil.h"
 
 #include "Common/Swap.h"
@@ -37,7 +39,10 @@ static u32 Decode5A3(u16 val)
     b = (s_lut4to8[(val) & 0xf] * a + ((bg_color >> 16) & 0xFF) * (255 - a)) / 255;
     a = 0xFF;
   }
-  return (a << 24) | (r << 16) | (g << 8) | b;
+  if constexpr (std::endian::native == std::endian::little)
+    return static_cast<u32>((a << 24) | (r << 16) | (g << 8) | b);
+  else
+    return static_cast<u32>((b << 24) | (g << 16) | (r << 8) | a);
 }
 
 void Decode5A3Image(u32* dst, const u16* src, int width, int height)
@@ -50,7 +55,7 @@ void Decode5A3Image(u32* dst, const u16* src, int width, int height)
       {
         for (int ix = 0; ix < 4; ix++)
         {
-          u32 RGBA = Decode5A3(Common::swap16(src[ix]));
+          u32 RGBA = Decode5A3(Common::FromBigEndian(src[ix]));
           dst[(y + iy) * width + (x + ix)] = RGBA;
         }
       }
@@ -70,7 +75,7 @@ void DecodeCI8Image(u32* dst, const u8* src, const u16* pal, int width, int heig
         for (int ix = 0; ix < 8; ix++)
         {
           // huh, this seems wrong. CI8, not 5A3, no?
-          tdst[ix] = Decode5A3(Common::swap16(pal[src[ix]]));
+          tdst[ix] = Decode5A3(Common::FromBigEndian(pal[src[ix]]));
         }
       }
     }

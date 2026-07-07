@@ -5,6 +5,8 @@
 
 #include <cstring>
 
+#include <bit>
+
 #include "Common/CommonTypes.h"
 #include "Common/EnumMap.h"
 #include "Common/MsgHandler.h"
@@ -25,7 +27,13 @@ constexpr u32 alpha_mask = 0xFF000000;
 
 void SetCol(VertexLoader* loader, u32 val)
 {
-  DataWrite(val);
+  // MakeRGBA stores components as bits[7:0]=R, bits[15:8]=G, bits[23:16]=B, bits[31:24]=A.
+  // Write individual bytes to ensure [R, G, B, A] order regardless of host endianness.
+  g_vertex_manager_write_ptr[0] = static_cast<u8>(val);
+  g_vertex_manager_write_ptr[1] = static_cast<u8>(val >> 8);
+  g_vertex_manager_write_ptr[2] = static_cast<u8>(val >> 16);
+  g_vertex_manager_write_ptr[3] = static_cast<u8>(val >> 24);
+  g_vertex_manager_write_ptr += 4;
   loader->m_colIndex++;
 }
 
@@ -71,6 +79,8 @@ u32 Read32(const u8* addr)
 {
   u32 value;
   std::memcpy(&value, addr, sizeof(u32));
+  if constexpr (std::endian::native == std::endian::big)
+    value = Common::swap32(value);
   return value;
 }
 
@@ -90,7 +100,7 @@ void Color_ReadIndex_16b_565(VertexLoader* loader)
   u16 value;
   std::memcpy(&value, address, sizeof(u16));
 
-  SetCol565(loader, Common::swap16(value));
+  SetCol565(loader, Common::FromBigEndian(value));
 }
 
 template <typename I>

@@ -205,7 +205,7 @@ static std::optional<PartitionType> ParsePartitionDirectoryName(const std::strin
     // e.g. "P-HA8E" (normally only used for Super Smash Bros. Brawl's VC partitions)
     if (name[1] == '-' && name.size() == 6)
     {
-      const u32 result = Common::swap32(reinterpret_cast<const u8*>(name.data() + 2));
+      const u32 result = Common::FromBigEndian(reinterpret_cast<const u8*>(name.data() + 2));
       return static_cast<PartitionType>(result);
     }
 
@@ -969,8 +969,8 @@ void DirectoryBlobPartition::SetDiscType(std::optional<bool> is_wii,
   }
   else
   {
-    m_is_wii = Common::swap32(&disc_header[0x18]) == WII_DISC_MAGIC;
-    const bool is_gc = Common::swap32(&disc_header[0x1c]) == GAMECUBE_DISC_MAGIC;
+    m_is_wii = Common::FromBigEndian(&disc_header[0x18]) == WII_DISC_MAGIC;
+    const bool is_gc = Common::FromBigEndian(&disc_header[0x1c]) == GAMECUBE_DISC_MAGIC;
     if (m_is_wii == is_gc)
     {
       ERROR_LOG_FMT(DISCIO, "Couldn't detect disc type based on disc header; assuming {}",
@@ -1025,7 +1025,7 @@ u64 DirectoryBlobPartition::SetApploader(std::vector<u8> apploader, const std::s
   else
   {
     const size_t apploader_size =
-        0x20 + Common::swap32(*(u32*)&apploader[0x14]) + Common::swap32(*(u32*)&apploader[0x18]);
+        0x20 + Common::FromBigEndian(&apploader[0x14]) + Common::FromBigEndian(&apploader[0x18]);
     if (apploader_size != apploader.size())
       ERROR_LOG_FMT(DISCIO, "{} is the wrong size... Is it really an apploader?", log_path);
     else

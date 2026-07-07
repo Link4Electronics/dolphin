@@ -277,7 +277,7 @@ void AXWiiUCode::AddToLR(u32 val_addr, bool neg)
   int* ptr = reinterpret_cast<int*>(memory.GetPointerForRange(val_addr, 32 * 3 * sizeof(int)));
   for (int i = 0; i < 32 * 3; ++i)
   {
-    int val = (int)Common::swap32(*ptr++);
+    int val = (int)Common::FromBigEndian(*ptr++);
     if (neg)
       val = -val;
 
@@ -292,12 +292,12 @@ void AXWiiUCode::AddSubToLR(u32 val_addr)
   int* ptr = reinterpret_cast<int*>(memory.GetPointerForRange(val_addr, 2 * 32 * 3 * sizeof(int)));
   for (int i = 0; i < 32 * 3; ++i)
   {
-    int val = (int)Common::swap32(*ptr++);
+    int val = (int)Common::FromBigEndian(*ptr++);
     m_samples_main_left[i] += val;
   }
   for (int i = 0; i < 32 * 3; ++i)
   {
-    int val = (int)Common::swap32(*ptr++);
+    int val = (int)Common::FromBigEndian(*ptr++);
     m_samples_main_right[i] -= val;
   }
 }
@@ -540,7 +540,7 @@ void AXWiiUCode::MixAUXSamples(int aux_id, u32 write_addr, u32 read_addr, u16 vo
   {
     for (u32 j = 0; j < 3 * 32; ++j)
     {
-      s64 sample = (s64)(s32)Common::swap32(*ptr++);
+      s64 sample = (s64)(s32)Common::FromBigEndian(*ptr++);
       sample *= volume_ramp[j];
       main_buffer[j] += (s32)(sample >> 15);
     }
@@ -613,8 +613,8 @@ void AXWiiUCode::OutputSamples(u32 lr_addr, u32 surround_addr, u16 volume, bool 
   std::array<s16, 3 * 32 * 2> buffer;
   for (size_t i = 0; i < 3 * 32; ++i)
   {
-    buffer[2 * i] = Common::swap16(m_samples_main_right[i]);
-    buffer[2 * i + 1] = Common::swap16(m_samples_main_left[i]);
+    buffer[2 * i] = Common::ToBigEndian(m_samples_main_right[i]);
+    buffer[2 * i + 1] = Common::ToBigEndian(m_samples_main_left[i]);
   }
 
   memory.CopyToEmu(lr_addr, buffer.data(), sizeof(buffer));
@@ -633,7 +633,7 @@ void AXWiiUCode::OutputWMSamples(u32* addresses)
     for (u32 j = 0; j < 3 * 6; ++j)
     {
       s16 sample = ClampS16(in[j]);
-      out[j] = Common::swap16((u16)sample);
+      out[j] = Common::ToBigEndian((u16)sample);
     }
   }
 }

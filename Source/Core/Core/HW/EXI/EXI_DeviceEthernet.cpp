@@ -400,11 +400,11 @@ void CEXIETHERNET::MXCommandHandler(u32 data, u32 size)
 
   case BBA_WRTXFIFOD:
     if (size == 2)
-      data = Common::swap16(data & 0xffff);
+      data = Common::ToBigEndian(data & 0xffff);
     else if (size == 3)
-      data = Common::swap32(data & 0xffffff) >> 8;
+      data = Common::ToBigEndian(data & 0xffffff) >> 8;
     else if (size == 4)
-      data = Common::swap32(data);
+      data = Common::ToBigEndian(data);
     DirectFIFOWrite((u8*)&data, size);
     // Do not increment address
     return;

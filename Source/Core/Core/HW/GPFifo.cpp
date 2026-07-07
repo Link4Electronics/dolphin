@@ -163,7 +163,7 @@ void GPFifoManager::FastWrite8(const u8 value)
 
 void GPFifoManager::FastWrite16(u16 value)
 {
-  value = Common::swap16(value);
+  value = Common::ToBigEndian(value);
   auto& ppc_state = m_system.GetPPCState();
   std::memcpy(ppc_state.gather_pipe_ptr, &value, sizeof(u16));
   ppc_state.gather_pipe_ptr += sizeof(u16);
@@ -171,7 +171,7 @@ void GPFifoManager::FastWrite16(u16 value)
 
 void GPFifoManager::FastWrite32(u32 value)
 {
-  value = Common::swap32(value);
+  value = Common::ToBigEndian(value);
   auto& ppc_state = m_system.GetPPCState();
   std::memcpy(ppc_state.gather_pipe_ptr, &value, sizeof(u32));
   ppc_state.gather_pipe_ptr += sizeof(u32);
@@ -179,7 +179,7 @@ void GPFifoManager::FastWrite32(u32 value)
 
 void GPFifoManager::FastWrite64(u64 value)
 {
-  value = Common::swap64(value);
+  value = Common::ToBigEndian(value);
   auto& ppc_state = m_system.GetPPCState();
   std::memcpy(ppc_state.gather_pipe_ptr, &value, sizeof(u64));
   ppc_state.gather_pipe_ptr += sizeof(u64);

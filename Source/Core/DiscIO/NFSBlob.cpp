@@ -52,7 +52,7 @@ bool NFSFileReader::ReadKey(const std::string& path, const std::string& director
 std::vector<NFSLBARange> NFSFileReader::GetLBARanges(const NFSHeader& header)
 {
   const size_t lba_range_count =
-      std::min<size_t>(Common::swap32(header.lba_range_count), header.lba_ranges.size());
+      std::min<size_t>(Common::FromBigEndian(header.lba_range_count), header.lba_ranges.size());
 
   std::vector<NFSLBARange> lba_ranges;
   lba_ranges.reserve(lba_range_count);
@@ -60,8 +60,8 @@ std::vector<NFSLBARange> NFSFileReader::GetLBARanges(const NFSHeader& header)
   for (size_t i = 0; i < lba_range_count; ++i)
   {
     const NFSLBARange& unswapped_lba_range = header.lba_ranges[i];
-    lba_ranges.push_back(NFSLBARange{Common::swap32(unswapped_lba_range.start_block),
-                                     Common::swap32(unswapped_lba_range.num_blocks)});
+    lba_ranges.push_back(NFSLBARange{Common::FromBigEndian(unswapped_lba_range.start_block),
+                                     Common::FromBigEndian(unswapped_lba_range.num_blocks)});
   }
 
   return lba_ranges;
@@ -136,7 +136,8 @@ std::unique_ptr<NFSFileReader> NFSFileReader::Create(File::DirectIOFile first_fi
     return nullptr;
 
   NFSHeader header;
-  if (!first_file.OffsetRead(0, Common::AsWritableU8Span(header)) || header.magic != NFS_MAGIC)
+  if (!first_file.OffsetRead(0, Common::AsWritableU8Span(header)) ||
+      Common::FromLittleEndian(header.magic) != NFS_MAGIC)
     return nullptr;
 
   std::vector<NFSLBARange> lba_ranges = GetLBARanges(header);
@@ -238,7 +239,7 @@ bool NFSFileReader::ReadEncryptedBlock(u64 physical_block_index)
 void NFSFileReader::DecryptBlock(u64 logical_block_index)
 {
   std::array<u8, 16> iv{};
-  const u64 swapped_block_index = Common::swap64(logical_block_index);
+  const u64 swapped_block_index = Common::ToBigEndian(logical_block_index);
   std::memcpy(iv.data() + iv.size() - sizeof(swapped_block_index), &swapped_block_index,
               sizeof(swapped_block_index));
 

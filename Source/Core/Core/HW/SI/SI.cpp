@@ -332,11 +332,11 @@ void SerialInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
                      const auto& si = system.GetSerialInterface();
                      u32 val;
                      std::memcpy(&val, &si.m_si_buffer[i], sizeof(val));
-                     return Common::swap32(val);
+                     return Common::FromBigEndian(val);
                    }),
                    MMIO::ComplexWrite<u32>([i](Core::System& system, u32, u32 val) {
                      auto& si = system.GetSerialInterface();
-                     val = Common::swap32(val);
+                     val = Common::ToBigEndian(val);
                      std::memcpy(&si.m_si_buffer[i], &val, sizeof(val));
                    }));
   }
@@ -348,11 +348,11 @@ void SerialInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
                      const auto& si = system.GetSerialInterface();
                      u16 val;
                      std::memcpy(&val, &si.m_si_buffer[i], sizeof(val));
-                     return Common::swap16(val);
+                     return Common::FromBigEndian(val);
                    }),
                    MMIO::ComplexWrite<u16>([i](Core::System& system, u32, u16 val) {
                      auto& si = system.GetSerialInterface();
-                     val = Common::swap16(val);
+                     val = Common::ToBigEndian(val);
                      std::memcpy(&si.m_si_buffer[i], &val, sizeof(val));
                    }));
   }

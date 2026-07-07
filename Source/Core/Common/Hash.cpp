@@ -11,6 +11,7 @@
 
 #include "Common/CPUDetect.h"
 #include "Common/Intrinsics.h"
+#include "Common/Swap.h"
 
 #ifdef _M_ARM_64
 #ifdef _MSC_VER
@@ -51,7 +52,7 @@ u32 HashEctor(const u8* data, size_t len)
 
 static u64 getblock(const u64* p, int i)
 {
-  return p[i];
+  return Common::FromLittleEndian(p[i]);
 }
 
 //----------
@@ -192,7 +193,7 @@ static u64 GetMurmurHash3(const u8* src, u32 len, u32 samples)
 
 static u32 getblock(const u32* p, int i)
 {
-  return p[i];
+  return Common::FromLittleEndian(p[i]);
 }
 
 //----------
@@ -239,7 +240,6 @@ static void bmix32(u32& h1, u32& h2, u32& k1, u32& k2, u32& c1, u32& c2)
 static u64 GetMurmurHash3(const u8* src, u32 len, u32 samples)
 {
   const u8* data = (const u8*)src;
-  u32 out[2];
   const int nblocks = len / 8;
   u32 Step = (len / 4);
   if (samples == 0)
@@ -308,10 +308,7 @@ static u64 GetMurmurHash3(const u8* src, u32 len, u32 samples)
   h1 += h2;
   h2 += h1;
 
-  out[0] = h1;
-  out[1] = h2;
-
-  return *((u64*)&out);
+  return (static_cast<u64>(h2) << 32) | h1;
 }
 
 #endif

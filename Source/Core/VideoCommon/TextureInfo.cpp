@@ -150,7 +150,9 @@ TextureInfo::NameDetails TextureInfo::CalculateTextureName() const
   case 16384 * 2:
     for (size_t i = 0; i < m_texture_size; i += sizeof(u16))
     {
-      const u32 texture_halfword = Common::swap16(m_data[i]) & 0x3fff;
+      u16 texture_word;
+      std::memcpy(&texture_word, &m_data[i], sizeof(u16));
+      const u32 texture_halfword = Common::FromBigEndian(texture_word) & 0x3fff;
 
       min = std::min(min, texture_halfword);
       max = std::max(max, texture_halfword);

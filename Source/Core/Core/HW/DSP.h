@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <bit>
 #include <memory>
 
 #include "Common/CommonTypes.h"
@@ -38,6 +39,22 @@ enum
   ARAM_MASK = 0x00FFFFFF,
 };
 
+// Bit reversal for DSP control register (endian-independent bitfield access)
+// GCC on BE allocates bitfields MSB-first; on LE, LSB-first.
+// We store Hex in host-bitfield order internally but convert at Gekko boundaries.
+constexpr u16 HostToGekko16(u16 x)
+{
+  if constexpr (std::endian::native == std::endian::big)
+  {
+    // 16-bit bit reversal
+    x = ((x & 0xFF00) >> 8) | ((x & 0x00FF) << 8);
+    x = ((x & 0xF0F0) >> 4) | ((x & 0x0F0F) << 4);
+    x = ((x & 0xCCCC) >> 2) | ((x & 0x3333) << 2);
+    x = ((x & 0xAAAA) >> 1) | ((x & 0x5555) << 1);
+  }
+  return x;
+}
+
 // UDSPControl
 constexpr u16 DSP_CONTROL_MASK = 0x0C07;
 union UDSPControl
@@ -65,7 +82,8 @@ union UDSPControl
     u16 DSPInit : 1;      // DSPInit() writes to this flag
     u16 pad : 4;
   };
-  UDSPControl(u16 hex = 0) : Hex(hex) {}
+  UDSPControl(u16 hex = 0) : Hex(HostToGekko16(hex)) {}
+  u16 GekkoHex() const { return HostToGekko16(Hex); }
 };
 
 class DSPManager
@@ -116,8 +134,13 @@ private:
     u32 Hex = 0;
     struct
     {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      u32 dir : 1;  // 0: MRAM -> ARAM 1: ARAM -> MRAM
+      u32 count : 31;
+#else
       u32 count : 31;
       u32 dir : 1;  // 0: MRAM -> ARAM 1: ARAM -> MRAM
+#endif
     };
   };
 
@@ -127,8 +150,13 @@ private:
     u16 Hex = 0;
     struct
     {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      u16 Enable : 1;
+      u16 NumBlocks : 15;
+#else
       u16 NumBlocks : 15;
       u16 Enable : 1;
+#endif
     };
   };
 
@@ -163,9 +191,15 @@ private:
     u16 Hex = 0;
     struct
     {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      u16 : 9;
+      u16 unk : 1;
+      u16 size : 6;
+#else
       u16 size : 6;
       u16 unk : 1;
       u16 : 9;
+#endif
     };
   };
 

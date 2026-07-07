@@ -464,7 +464,7 @@ private:
     // Write signatures.
     if (!m_file.Seek(0, File::SeekOrigin::End))
       return false;
-    const u32 SIGNATURE_END_MAGIC = Common::swap32(0x2f536969);
+    const u32 SIGNATURE_END_MAGIC = Common::ToBigEndian(0x2f536969);
     const IOS::CertECC device_certificate = m_iosc.GetDeviceCertificate();
     return m_file.WriteArray(ap_sig.data(), ap_sig.size()) &&
            m_file.WriteArray(&SIGNATURE_END_MAGIC, 1) &&

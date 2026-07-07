@@ -147,7 +147,7 @@ static DOLPHIN_FORCE_INLINE u32 RunCommand(const u8* data, u32 available,
       return 0;
 
     const u8 cmd2 = data[1];
-    const u32 value = Common::swap32(&data[2]);
+    const u32 value = Common::FromBigEndian(&data[2]);
 
     callback.OnCP(cmd2, value);
 
@@ -159,7 +159,7 @@ static DOLPHIN_FORCE_INLINE u32 RunCommand(const u8* data, u32 available,
     if (available < 5)
       return 0;
 
-    const u32 cmd2 = Common::swap32(&data[1]);
+    const u32 cmd2 = Common::FromBigEndian(&data[1]);
     const u16 base_address = cmd2 & 0xffff;
 
     const u16 stream_size_temp = cmd2 >> 16;
@@ -182,7 +182,7 @@ static DOLPHIN_FORCE_INLINE u32 RunCommand(const u8* data, u32 available,
     if (available < 5)
       return 0;
 
-    const u32 value = Common::swap32(&data[1]);
+    const u32 value = Common::FromBigEndian(&data[1]);
 
     const u32 index = value >> 16;
     const u16 address = value & 0xFFF;  // TODO: check mask
@@ -204,8 +204,8 @@ static DOLPHIN_FORCE_INLINE u32 RunCommand(const u8* data, u32 available,
     if (available < 9)
       return 0;
 
-    const u32 address = Common::swap32(&data[1]);
-    const u32 size = Common::swap32(&data[5]);
+    const u32 address = Common::FromBigEndian(&data[1]);
+    const u32 size = Common::FromBigEndian(&data[5]);
 
     // Force 32-byte alignment for both the address and the size.
     callback.OnDisplayList(address & ~31, size & ~31);
@@ -237,7 +237,9 @@ static DOLPHIN_FORCE_INLINE u32 RunCommand(const u8* data, u32 available,
       const u8 vat = cmdbyte & OpcodeDecoder::GX_VAT_MASK;
 
       const u32 vertex_size = callback.GetVertexSize(vat);
-      const u16 num_vertices = Common::swap16(&data[1]);
+      u16 num_vertices_raw;
+      std::memcpy(&num_vertices_raw, &data[1], sizeof(u16));
+      const u16 num_vertices = Common::FromBigEndian(num_vertices_raw);
 
       if (available < 3 + num_vertices * vertex_size)
         return 0;
