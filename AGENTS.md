@@ -246,6 +246,14 @@ All Wiimote-related bitfield structs are now fixed.
 | `ElfReader.cpp:198-206` | Symbol table reads → `FromBigEndian` |
 | `ElfReader.cpp:239-240` | HID4 pattern → `FromBigEndian` |
 
+### Core/SysConf (System Configuration)
+
+| File | Change |
+|------|--------|
+| `SysConf.cpp:69` | `number_of_entries = Common::swap16(number_of_entries)` → `Common::FromBigEndian` — SYSCONF file stores all u16 fields in BE. On BE host, `swap16` swapped correct BE to wrong LE, corrupting the entire system configuration (display settings, BT sync info, network config, etc.). Caused "read/write to system/sd card" errors in System Menu and games. |
+| `SysConf.cpp:75` | Same fix for offset table entries. |
+| `SysConf.cpp:99` | Same fix for BigArray data_length. |
+
 ### Core/IOS/ES (WAD/TMD/Ticket/Cert)
 
 | File | Change |

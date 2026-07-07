@@ -66,13 +66,13 @@ bool SysConf::LoadFromFile(const IOS::HLE::FS::FileHandle& file)
   (void)file.Seek(4, IOS::HLE::FS::SeekMode::Set);
   u16 number_of_entries;
   (void)file.Read(&number_of_entries, 1);
-  number_of_entries = Common::swap16(number_of_entries);
+  number_of_entries = Common::FromBigEndian(number_of_entries);
 
   std::vector<u16> offsets(number_of_entries);
   for (u16& offset : offsets)
   {
     (void)file.Read(&offset, 1);
-    offset = Common::swap16(offset);
+    offset = Common::FromBigEndian(offset);
   }
 
   for (const u16 offset : offsets)
@@ -96,7 +96,7 @@ bool SysConf::LoadFromFile(const IOS::HLE::FS::FileHandle& file)
       u16 data_length = 0;
       (void)file.Read(&data_length, 1);
       // The stored u16 is length - 1, not length.
-      data.resize(Common::swap16(data_length) + 1);
+      data.resize(Common::FromBigEndian(data_length) + 1);
       break;
     }
     case Entry::Type::SmallArray:
