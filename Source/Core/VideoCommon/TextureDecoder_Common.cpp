@@ -344,6 +344,14 @@ static inline u32 DecodePixel_RGB5A3(u16 val)
   return r | (g << 8) | (b << 16) | (a << 24);
 }
 
+static inline void SetTexelBytes(u8* dst, u32 val)
+{
+  dst[0] = u8(val);
+  dst[1] = u8(val >> 8);
+  dst[2] = u8(val >> 16);
+  dst[3] = u8(val >> 24);
+}
+
 static inline u32 DecodePixel_Paletted(u16 pixel, TLUTFormat tlutfmt)
 {
   switch (tlutfmt)
@@ -391,7 +399,7 @@ void TexDecoder_DecodeTexel(u8* dst, std::span<const u8> src, int s, int t, int 
     u8 val = (Common::SafeSpanRead<u8>(src, offset) >> rs) & 0xF;
     u16 pixel = Common::SafeSpanRead<u16>(tlut_, sizeof(u16) * val);
 
-    *((u32*)dst) = DecodePixel_Paletted(pixel, tlutfmt);
+    SetTexelBytes(dst, DecodePixel_Paletted(pixel, tlutfmt));
   }
   break;
   case TextureFormat::I4:
@@ -445,7 +453,7 @@ void TexDecoder_DecodeTexel(u8* dst, std::span<const u8> src, int s, int t, int 
     u8 val = Common::SafeSpanRead<u8>(src, base + blkOff);
     u16 pixel = Common::SafeSpanRead<u16>(tlut_, sizeof(u16) * val);
 
-    *((u32*)dst) = DecodePixel_Paletted(pixel, tlutfmt);
+    SetTexelBytes(dst, DecodePixel_Paletted(pixel, tlutfmt));
   }
   break;
   case TextureFormat::IA4:
@@ -480,7 +488,7 @@ void TexDecoder_DecodeTexel(u8* dst, std::span<const u8> src, int s, int t, int 
     u32 offset = (base + blkOff) << 1;
     u16 val = Common::SafeSpanRead<u16>(src, offset);
 
-    *((u32*)dst) = DecodePixel_IA8(val);
+    SetTexelBytes(dst, DecodePixel_IA8(val));
   }
   break;
   case TextureFormat::C14X2:
@@ -497,7 +505,7 @@ void TexDecoder_DecodeTexel(u8* dst, std::span<const u8> src, int s, int t, int 
     u16 val = Common::FromBigEndian(Common::SafeSpanRead<u16>(src, offset)) & 0x3FFF;
     u16 pixel = Common::SafeSpanRead<u16>(tlut_, sizeof(u16) * val);
 
-    *((u32*)dst) = DecodePixel_Paletted(pixel, tlutfmt);
+    SetTexelBytes(dst, DecodePixel_Paletted(pixel, tlutfmt));
   }
   break;
   case TextureFormat::RGB565:
@@ -513,7 +521,7 @@ void TexDecoder_DecodeTexel(u8* dst, std::span<const u8> src, int s, int t, int 
     u32 offset = (base + blkOff) << 1;
     u16 val = Common::SafeSpanRead<u16>(src, offset);
 
-    *((u32*)dst) = DecodePixel_RGB565(Common::FromBigEndian(val));
+    SetTexelBytes(dst, DecodePixel_RGB565(Common::FromBigEndian(val)));
   }
   break;
   case TextureFormat::RGB5A3:
@@ -529,7 +537,7 @@ void TexDecoder_DecodeTexel(u8* dst, std::span<const u8> src, int s, int t, int 
     u32 offset = (base + blkOff) << 1;
     u16 val = Common::SafeSpanRead<u16>(src, offset);
 
-    *((u32*)dst) = DecodePixel_RGB5A3(Common::FromBigEndian(val));
+    SetTexelBytes(dst, DecodePixel_RGB5A3(Common::FromBigEndian(val)));
   }
   break;
   case TextureFormat::RGBA8:
@@ -615,7 +623,7 @@ void TexDecoder_DecodeTexel(u8* dst, std::span<const u8> src, int s, int t, int 
       break;
     }
 
-    *((u32*)dst) = color;
+    SetTexelBytes(dst, color);
   }
   break;
   case TextureFormat::XFB:
