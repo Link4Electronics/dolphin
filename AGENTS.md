@@ -186,6 +186,7 @@ Wiimote unions are not needed for GC-only use (Swiss on a GameCube).
 | `OGLTexture.cpp:357-369` | **Removed** byteswap from `OGLTexture::Load` — data is now already in `[R,G,B,A]` byte order from the decoder. Avoids double-swapping custom/OSD textures from image files. |
 | `SWOGLWindow.cpp:93-101` | `SWOGLWindow::ShowImage`: added conditional byteswap on BE for XFB display — converts native u32 byte order to GL_RGBA byte order before `glTexImage2D` upload. |
 | `PulseAudioStream.cpp:88` | `PA_SAMPLE_S16LE` → `PA_SAMPLE_S16NE` (BE host was telling PulseAudio that BE sample data is LE — caused static noise on all audio output). |
+| `VertexLoader.cpp:26` | `PosMtx_ReadDirect_UByte`: `DataWrite<u32>(posmtx)` → `DataWrite<u32>(ToLittleEndian(posmtx))`. On BE, u32 write stored `[0, 0, 0, value]` but SW renderer reads byte 0 getting 0 → every vertex uses matrix index 0 → wrong bones → spiky/lying-down 3D geometry. Fix writes LE byte order `[value, 0, 0, 0]` on all hosts. |
 
 ### SW EFB Interface (color inversion fix)
 
@@ -238,6 +239,12 @@ Wiimote unions are not needed for GC-only use (Swiss on a GameCube).
 - `Read`: `(TU << 32) | TL` (combines as arithmetic values, not by pointer reinterpretation)
 - `Write`: `TL = u32(value); TU = u32(value >> 32)` (writes halves individually)
 
+### 2. VertexLoader posmtx Byte Order (Opaque Matrix / Vertex Blast fix)
+
+**Root cause:** `VertexLoader::PosMtx_ReadDirect_UByte` wrote `DataWrite<u32>(posmtx)`. On BE, the u32 store placed the value in the 4th byte (MSB) but both SW renderer and OGL backend read byte 0 (via `Read<u8, false>` or `GL_UNSIGNED_BYTE` × 4 vertex fetch), getting 0. Every vertex used matrix index 0 → identity bind pose → spiky/lying-down geometry in Luigi's Mansion, Mario Kart: Double Dash, and similar complex 3D renders. Simple models (IPL logo, F-Zero GX) were unaffected because they don't set per-vertex `PosMatIdx`.
+
+**Fix:** `DataWrite<u32>(Common::ToLittleEndian(static_cast<u32>(posmtx)))` — always writes bytes `[value, 0, 0, 0]` regardless of host endianness. Occurs in `Source/Core/VideoCommon/VertexLoader.cpp:26`.
+
 ## Known Remaining Issues
 
 ### 1. LaggedFibonacciGenerator (Wii Encryption)
@@ -260,20 +267,17 @@ On BE, Mesa on UMA reads buffer data as-is (no byteswap on unmap), but `MapAndSy
 
 ### 3. OGL Vertex Blast (3D Models Only)
 
-**Status:** UNFIXED
+**Status:** FIXED (VertexLoader posmtx byte order, see #2 in Fixed section)
 
 **Symptom:** GC IPL logo renders perfectly (simple textured quad, 4 vertices, 6 indices). Luigi's Mansion 3D models have vertex blast (spiky geometry).
 
-**Root cause hypothesis:** Mesa byteswaps `GL_ARRAY_BUFFER` data during `glBufferSubData`, but does NOT byteswap `GL_ELEMENT_ARRAY_BUFFER` data. On BE host, `IndexGenerator::AddIndices` writes indices in host byte order (BE). These go through `BufferSubData::Unmap` → `glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, ...)`, but Mesa does not apply byte-swapping to element array buffers → GPU receives BE indices → wrong vertex lookups → spiky geometry.
+**Root cause:** `VertexLoader::PosMtx_ReadDirect_UByte` wrote `DataWrite<u32>(posmtx)`. On BE, the u32 store placed the value in the 4th byte (MSB) but the SW renderer reads byte 0, getting 0 → every vertex uses matrix index 0 → identity bind pose → spiky/lying-down geometry.
 
-The IPL logo's 6 indices over 4 vertices produce acceptable-looking results even with wrong index byte order because only 2 triangles share 4 vertices. Complex models with hundreds of vertices experience severe index corruption.
+F-Zero GX and IPL work because they don't set `PosMatIdx` in the vertex descriptor — their position matrix comes from `MatrixIndexA.PosNormalMtxIdx` (XF state), not from per-vertex data.
 
-**Past attempts:**
-- `DataWrite`/`IndexGenerator` explicit byteswap (reverted): Caused double-swap regression in IPL — Mesa already swapped `GL_ARRAY_BUFFER` (vertex) data, so swapping again produced wrong vertex positions. These changes affected both vertex and index data paths together.
-- `BufferSubData` orphan-on-wrap (still committed): `glBufferData(nullptr, GL_STREAM_DRAW)` on wrap. Resolved flashing trees (Luigi's Mansion). GC IPL works fine with this. Not the cause of vertex blast.
+**Why OGL was affected too:** Mesa on PPC64 BE does NOT byteswap `GL_ARRAY_BUFFER` data during `glBufferSubData`. The vertex buffer contains BE byte-order u32 values that are read byte-by-byte by the OGL vertex fetch. The `[0, 0, 0, value]` byte layout puts `value` in the last byte regardless of Mesa involvement.
 
-**Next steps:**
-- Isolate index byteswap from vertex byteswap: swap u16 indices at the `IndexGenerator` level only (leave `DataWrite`/vertex data unswapped). Mesa's `GL_ARRAY_BUFFER` byteswap handles vertices correctly, but `GL_ELEMENT_ARRAY_BUFFER` indices need explicit swap before upload.
+**Fix:** `DataWrite<u32>(Common::ToLittleEndian(static_cast<u32>(posmtx)))` in `PosMtx_ReadDirect_UByte` — always writes bytes `[value, 0, 0, 0]` regardless of host endianness. Both SW (reads byte 0) and OGL (reads byte 0 via GL_UNSIGNED_BYTE × 4) see the correct value.
 
 ### 4. Vulkan Renderer
 Not needed for R600 (OpenGL only scenario), but the Vulkan backend may have endian assumptions.
