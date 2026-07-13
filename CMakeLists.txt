@@ -225,6 +225,9 @@ elseif(_ARCH_64 AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
   add_definitions(-D_M_ARM_64=1)
   # CRC instruction set is used in the CRC32 hash function
   check_and_add_flag(HAVE_ARCH_ARMV8 -march=armv8-a+crc)
+elseif(_ARCH_64 AND CMAKE_SYSTEM_PROCESSOR MATCHES "powerpc64|ppc64|ppc64le")
+  set(_M_PPC_64 1)
+  add_definitions(-D_M_PPC_64=1)
 else()
   message(FATAL_ERROR "You're building on an unsupported platform: "
       "'${CMAKE_SYSTEM_PROCESSOR}' with ${CMAKE_SIZEOF_VOID_P}-byte pointers."

@@ -132,6 +132,16 @@ public:
   ///
   size_t GetPageSize() const;
 
+  // Expose the SHM fd for direct mmap calls (NCE guest mapping needs PROT_EXEC)
+  int GetSHMFD() const
+  {
+#if defined(_WIN32) || defined(__APPLE__)
+    return -1;
+#else
+    return m_shm_fd;
+#endif
+  }
+
 private:
 #ifdef _WIN32
   WindowsMemoryRegion* EnsureSplitRegionForMapping(void* address, size_t size);

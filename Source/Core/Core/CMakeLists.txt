@@ -667,6 +667,15 @@ elseif(_M_ARM_64)
     PowerPC/JitArm64/JitArm64_Tables.cpp
     PowerPC/JitArmCommon/BackPatch.h
   )
+elseif(_M_PPC_64)
+  enable_language(ASM)
+  target_sources(core PRIVATE
+    PowerPC/JitPPC64/Jit.cpp
+    PowerPC/JitPPC64/Jit.h
+    PowerPC/JitPPC64/JitAsm.cpp
+    PowerPC/JitPPC64/JitAsm.h
+    PowerPC/JitPPC64/JitAsm.S
+  )
 endif()
 
 target_link_libraries(core

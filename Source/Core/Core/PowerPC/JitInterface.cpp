@@ -27,6 +27,10 @@
 #include "Core/PowerPC/JitArm64/Jit.h"
 #endif
 
+#ifdef _M_PPC_64
+#include "Core/PowerPC/JitPPC64/Jit.h"
+#endif
+
 JitInterface::JitInterface(Core::System& system) : m_system(system)
 {
 }
@@ -56,6 +60,11 @@ CPUCoreBase* JitInterface::InitJitCore(PowerPC::CPUCore core)
 #ifdef _M_ARM_64
   case PowerPC::CPUCore::JITARM64:
     m_jit = std::make_unique<JitArm64>(m_system);
+    break;
+#endif
+#ifdef _M_PPC_64
+  case PowerPC::CPUCore::JITPPC64:
+    m_jit = std::make_unique<JitPPC64>(m_system);
     break;
 #endif
   case PowerPC::CPUCore::CachedInterpreter:

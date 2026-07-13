@@ -96,7 +96,8 @@ void* MemArena::MapInMemoryRegion(s64 offset, size_t size, void* base, bool writ
   void* retval = mmap(base, size, prot, MAP_SHARED | MAP_FIXED, m_shm_fd, offset);
   if (retval == MAP_FAILED)
   {
-    NOTICE_LOG_FMT(MEMMAP, "mmap failed");
+    NOTICE_LOG_FMT(MEMMAP, "mmap failed at {} size {} errno={} {}", fmt::ptr(base), size, errno,
+                   strerror(errno));
     return nullptr;
   }
   else
