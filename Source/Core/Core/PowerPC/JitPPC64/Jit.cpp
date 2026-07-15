@@ -11,6 +11,7 @@
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <ucontext.h>
+#include <sched.h>
 
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
@@ -513,8 +514,7 @@ void JitPPC64::GeneratePsTrampolines()
 
 void JitPPC64::ScanDCBZ()
 {
-  if (!m_patched_dcbz.empty())
-    return;
+  m_patched_dcbz.clear();
 
   auto& memory = m_system.GetMemory();
   const u32 ram_size_val = memory.GetRamSizeReal();
@@ -580,8 +580,26 @@ void JitPPC64::ScanDCBZ()
 
 void JitPPC64::PatchAllDCBZ()
 {
-  if (m_dcbz_patches_applied || m_patched_dcbz.empty())
+  // If the game loaded new code (icbi was called), re-scan RAM for dcbz.
+  // Game-loaded dcbz are not in the Init-time scan and would otherwise
+  // execute natively on PPC970, zeroing 128 bytes instead of Gekko's 32.
+  if (m_dcbz_needs_rescan)
+  {
+    if (m_dcbz_patches_applied)
+      UnpatchAllDCBZ();
+    m_patched_dcbz.clear();
+    m_dcbz_needs_rescan = false;
+    // Fall through to ScanDCBZ below since map is now empty
+  }
+
+  if (m_dcbz_patches_applied)
     return;
+  if (m_patched_dcbz.empty())
+  {
+    ScanDCBZ();
+    if (m_patched_dcbz.empty())
+      return;
+  }
 
   const u32 illegal = 0x00000000u;  // illegal instruction → SIGILL
   for (const auto& [addr, unused] : m_patched_dcbz)
@@ -897,9 +915,15 @@ void JitPPC64::Run()
   int dfd = open("/home/link/nce_debug.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (dfd >= 0) { ::write(dfd, "AV\n", 3); ::close(dfd); }
 
-  auto cpu_state = cpu.GetState();
-
-  while (cpu_state == CPU::State::Running)
+  while ([&cpu]()
+         {
+           // Full memory barrier (sync on PPC64) — m_state is written by the GUI
+           // thread without any barrier or atomic, and PPC64 has a weak memory
+           // model.  Without this barrier the load of m_state can observe a stale
+           // value (Running) indefinitely after the GUI thread set it to PowerDown.
+           __sync_synchronize();
+           return cpu.GetState();
+         }() == CPU::State::Running)
   {
     core_timing.Advance();
 
@@ -1125,6 +1149,22 @@ void JitPPC64::Run()
         ::write(ie_fd, ie_buf, static_cast<size_t>(ie_len));
         ::close(ie_fd);
       }
+
+      // Full memory barrier (sync on PPC64) — m_state is written by the GUI
+      // thread without any barrier or atomic, and PPC64 has a weak memory
+      // model.  Without this barrier the load of m_state can observe a stale
+      // value (Running) indefinitely after the GUI thread set it to PowerDown.
+      __sync_synchronize();
+      // Check if CPU state changed while NCE was running (e.g., user clicked
+      // Stop).  Without this check, the inner loop only exits when downcount
+      // falls to zero, which can take up to 2ms (the ALRM interval).
+      if (cpu.GetState() != CPU::State::Running)
+        break;
+      // Yield after every NCE slice so the GUI/main thread can run (set CPU
+      // state to PowerDown).  On single-core systems the CPU thread monopolises
+      // the core; without yield() the GUI thread never gets scheduled to write
+      // m_state, and the outer loop keeps re-entering NCE despite Stop().
+      ::sched_yield();
     }
   }
 
@@ -1648,6 +1688,7 @@ void JitPPC64::HandleSIGSEGV(int sig, siginfo_t* info, void* uctx)
   // let the Run() loop handle it via interpreter fallback.
   if (fault_addr == pc_val)
   {
+    SaveGuestRegsFromContext(uctx);
     ExitNCEFromSignal(uctx, pc_val, true);
     return;
   }
@@ -1914,6 +1955,7 @@ void JitPPC64::HandleSIGSEGV(int sig, siginfo_t* info, void* uctx)
         MMIOWrite(phys_ea, Common::swap16(static_cast<u32>(ctx->uc_mcontext.regs->gpr[reg_dest] & 0xFFFF)), 2);
         break;
       default:
+        SaveGuestRegsFromContext(uctx);
         ExitNCEFromSignal(uctx, pc_val, true);
         return;
       }
@@ -1922,6 +1964,7 @@ void JitPPC64::HandleSIGSEGV(int sig, siginfo_t* info, void* uctx)
     }
     default:
       // (MMIO with unknown opcd — signal-safe: no NOTICE_LOG_FMT here)
+      SaveGuestRegsFromContext(uctx);
       ExitNCEFromSignal(uctx, pc_val, true);
       return;
     }
@@ -1944,6 +1987,49 @@ void JitPPC64::HandleSIGSEGV(int sig, siginfo_t* info, void* uctx)
   }
   else
   {
+    // Handle cache-control instructions (dcbz, dcbf, dcbst, dcbi) that are
+    // trapped by DSI because EA is at an address not mapped in the host page
+    // table (e.g., EA=0 on a system with vm.mmap_min_addr > 0).  These are
+    // cache-hint instructions; skipping them (NOP) at the unmapped address is
+    // safe because the guest cache state is irrelevant to emulation accuracy
+    // (the PPC970 manages its own cache).  For dcbz we also zero the 32 bytes
+    // at EA in emulated RAM to match Gekko semantics.
+    // This avoids the expensive NCE exit/re-entry cycle (~10µs) per iteration.
+    if (opcd == 31)
+    {
+      const u32 xo = (instr >> 1) & 0x3FF;
+      if (xo == 1014)  // dcbz (data cache block zero)
+      {
+        const u32 ra = (instr >> 21) & 0x1F;  // bits 6-10
+        const u32 rb = (instr >> 11) & 0x1F;  // bits 11-15
+        const u32 ea =
+            ((ra == 0 ? 0 : static_cast<u32>(ctx->uc_mcontext.regs->gpr[ra] & 0xFFFFFFFF)) +
+             static_cast<u32>(ctx->uc_mcontext.regs->gpr[rb] & 0xFFFFFFFF)) &
+            ~31u;
+
+        auto& mem = m_system.GetMemory();
+        const u32 ram_size_v = mem.GetRamSizeReal();
+        const u32 exram_size_v = mem.GetExRamSizeReal();
+        const u32 masked = ea & 0x3FFFFFFF;
+        if (masked + 32 <= ram_size_v)
+          std::memset(mem.GetRAM() + masked, 0, 32);
+        else if (exram_size_v > 0 && (masked >> 28) == 0x1 &&
+                 (masked & 0x0FFFFFFF) + 32 <= exram_size_v)
+          std::memset(mem.GetEXRAM() + (masked & 0x0FFFFFFF), 0, 32);
+
+        ctx->uc_mcontext.regs->nip = u64(pc_val) + 4;
+        return;
+      }
+      // dcbf (xo=86), dcbst (xo=54), dcbi (xo=470), dcbst (xo=470? no)
+      // are cache flush/invalidate operations that fault at EA=0.
+      // Just skip them — no memory write needed.
+      if (xo == 86 || xo == 54 || xo == 470)  // dcbf, dcbst, dcbi
+      {
+        ctx->uc_mcontext.regs->nip = u64(pc_val) + 4;
+        return;
+      }
+    }
+
     // Check if the fault address is outside valid guest memory (RAM or EXRAM).
     // If so, inject DSI instead of trying SlowmemDataAccess (which would
     // silently drop the access and corrupt guest state).
@@ -1956,6 +2042,7 @@ void JitPPC64::HandleSIGSEGV(int sig, siginfo_t* info, void* uctx)
                        (phys_fault & 0x0FFFFFFF) < exram_size);
     if (!in_valid_mem)
     {
+      SaveGuestRegsFromContext(uctx);
       ExitNCEFromSignal(uctx, pc_val, true);
       return;
     }
@@ -1967,6 +2054,7 @@ void JitPPC64::HandleSIGSEGV(int sig, siginfo_t* info, void* uctx)
 
     // SlowmemDataAccess couldn't handle this opcode pattern — exit NCE and
     // let the Run() loop handle it via interpreter fallback.
+    SaveGuestRegsFromContext(uctx);
     ExitNCEFromSignal(uctx, pc_val, true);
   }
 }
@@ -2375,8 +2463,8 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
   if (dcbz_it != m_patched_dcbz.end())
   {
     const u32 orig_instr = dcbz_it->second;
-    const u32 ra = (orig_instr >> 16) & 0x1F;
-    const u32 rb = orig_instr & 0x1F;
+    const u32 ra = (orig_instr >> 21) & 0x1F;   // bits 6-10
+    const u32 rb = (orig_instr >> 11) & 0x1F;   // bits 11-15
     const u32 ea = ((ra == 0 ? 0 : static_cast<u32>(ctx->uc_mcontext.regs->gpr[ra] & 0xFFFFFFFF)) +
                     static_cast<u32>(ctx->uc_mcontext.regs->gpr[rb] & 0xFFFFFFFF)) &
                    ~31u;  // dcbz aligns to 32-byte cache line boundary
@@ -2643,6 +2731,13 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
       gecko.hex = instr;
       FallBackToInterpreter(gecko);
       ctx->uc_mcontext.regs->nip = m_ppc_state.pc;
+      // icbi (Flush Instruction Cache) is called after new code is loaded
+      // into RAM (e.g., DOL loading via DVD).  Trigger a dcbz re-scan so
+      // that dcbz instructions in the newly-loaded code get patched before
+      // the next NCE entry — otherwise they execute natively on PPC970,
+      // zeroing 128 bytes instead of Gekko's 32.
+      if (xo == 982)  // icbi
+        m_dcbz_needs_rescan = true;
     }
   }
   else if (opcd == 19 && xo == 50)

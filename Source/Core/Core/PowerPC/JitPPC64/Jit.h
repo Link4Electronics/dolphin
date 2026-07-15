@@ -195,6 +195,7 @@ private:
   // dcbz → trap patch state
   std::unordered_map<u32, u32> m_patched_dcbz;  // NCE addr → original instruction
   bool m_dcbz_patches_applied = false;
+  bool m_dcbz_needs_rescan = false;
 
   // P0 → trap patch state
   std::unordered_map<u32, u32> m_patched_p0;
