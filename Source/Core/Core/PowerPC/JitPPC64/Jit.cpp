@@ -2514,6 +2514,13 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
     const u32 masked = ea & 0x3FFFFFFF;
 
     // === Optimize dcbz loop: detect dcbz; addi rN, rN, 32; bdnz+ ===
+    FILE* nce_log = fopen("/home/link/nce_debug.log", "a");
+    if (nce_log)
+    {
+      fprintf(nce_log, "DBZ: dcbz at 0x%08X, EA=0x%08X, RA=%u RB=%u\n",
+              static_cast<u32>(pc_val), ea, ra, rb);
+      fclose(nce_log);
+    }
     // When the game clears a large memory range via the idiom:
     //   dcbz 0, rN        (patched, traps here)
     //   addi rN, rN, 32   advance to next line
@@ -2536,8 +2543,9 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
 
       // addi rN, rN, 32 (opcode 14, RA=RD, SIMM=32)
       // followed by bc (opcode 16) with BO indicating bdnz/bdnz+/bdnz-
-      if (n1_opcd == 14 && n1_rd != 0 && n1_rd == n1_ra && n1_simm == 32 &&
-          n2_opcd == 16 && (n2_bo == 16 || n2_bo == 17 || n2_bo == 18))
+      const bool has_addi = (n1_opcd == 14 && n1_rd != 0 && n1_rd == n1_ra && n1_simm == 32);
+      const bool has_bdnz = (n2_opcd == 16 && (n2_bo == 16 || n2_bo == 17 || n2_bo == 18));
+      if (has_addi && has_bdnz)
       {
         // Verify the branch target points back to the dcbz instruction
         const u32 n2_bd = (next2 >> 16) & 0x3FFF;
@@ -2572,6 +2580,14 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
 
             if (loop_zeroed)
             {
+              FILE* nce_log2 = fopen("/home/link/nce_debug.log", "a");
+              if (nce_log2)
+              {
+                fprintf(nce_log2, "DBZ: loop opt at 0x%08X: %u lines, %u bytes, EA=0x%08X\n",
+                        static_cast<u32>(pc_val), ctr_val, total_bytes, ea);
+                fclose(nce_log2);
+              }
+
               // Update loop register to final value (EA + total_bytes)
               const u32 rn_val = static_cast<u32>(ctx->uc_mcontext.regs->gpr[n1_rd] & 0xFFFFFFFF);
               ctx->uc_mcontext.regs->gpr[n1_rd] = static_cast<u64>(rn_val + total_bytes);
@@ -2585,6 +2601,19 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
               return;  // loop fully emulated, continue native execution
             }
           }
+        }
+      }
+      else if (!has_addi || !has_bdnz)
+      {
+        FILE* nce_loop = fopen("/home/link/nce_debug.log", "a");
+        if (nce_loop)
+        {
+          fprintf(nce_loop,
+                  "DBZ: no loop pattern at 0x%08X: next1=0x%08X(opcd=%u,rd=%u,ra=%u,simm=%d) "
+                  "next2=0x%08X(opcd=%u,bo=%u) addi=%d bdnz=%d ra=%u rb=%u\n",
+                  static_cast<u32>(pc_val), next1, n1_opcd, n1_rd, n1_ra, n1_simm,
+                  next2, n2_opcd, n2_bo, has_addi, has_bdnz, ra, rb);
+          fclose(nce_loop);
         }
       }
     }
@@ -2609,8 +2638,30 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
         ::write(STDERR_FILENO, dcbz_oob, sizeof(dcbz_oob) - 1);
       }
 
+      {
+        FILE* nce_log3 = fopen("/home/link/nce_debug.log", "a");
+        if (nce_log3)
+        {
+          fprintf(nce_log3, "DBZ: single at 0x%08X, EA=0x%08X %s\n",
+                  static_cast<u32>(pc_val), ea, zeroed ? "zeroed" : "OOB");
+          fclose(nce_log3);
+        }
+      }
+
       ctx->uc_mcontext.regs->nip = u64(pc_val) + 4;
       return;  // continue native execution
+    }
+  }
+  else
+  {
+    u32 raw_instr = 0;
+    std::memcpy(&raw_instr, reinterpret_cast<const void*>(static_cast<u64>(pc_val)), sizeof(raw_instr));
+    FILE* nce_log4 = fopen("/home/link/nce_debug.log", "a");
+    if (nce_log4)
+    {
+      fprintf(nce_log4, "DBZ: SIGILL at 0x%08X NOT in patched_dcbz, raw=0x%08X\n",
+              static_cast<u32>(pc_val), raw_instr);
+      fclose(nce_log4);
     }
   }
 
