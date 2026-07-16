@@ -1707,13 +1707,26 @@ void JitPPC64::HandleSIGSEGV(int sig, siginfo_t* info, void* uctx)
   // Check if this is an MMIO access (use physical address)
   if (MMIO::IsMMIOAddress(phys_fault, m_system.IsWii()))
   {
-    [[maybe_unused]] bool is_read = (dsisr_val & 0x40000000) != 0;
+    bool is_read_mmio = (dsisr_val & 0x40000000) != 0;
 
     u32 reg_src = (instr >> 21) & 0x1F;
     u32 reg_dest = (instr >> 21) & 0x1F;
     u32 val = 0;
     bool is_store = false;
     int width = 4;
+
+    // Log MMIO access
+    {
+      int mf = open("/home/link/nce_debug.log", O_WRONLY | O_APPEND, 0644);
+      if (mf >= 0)
+      {
+        char mb[128];
+        int ml = std::snprintf(mb, sizeof(mb), "MIO: %s phys=%08x pc=%08x opcd=%u\n",
+                               is_read_mmio ? "RD" : "WR", phys_fault, pc_val, opcd);
+        ::write(mf, mb, static_cast<size_t>(ml));
+        ::close(mf);
+      }
+    }
 
     switch (opcd)
     {
@@ -1983,6 +1996,32 @@ void JitPPC64::HandleSIGSEGV(int sig, siginfo_t* info, void* uctx)
     }
 
     ctx->uc_mcontext.regs->nip = u64(pc_val) + 4;
+    // Log MMIO result value (for stores: val written; for reads: val in GPR)
+    if (is_store)
+    {
+      int mf2 = open("/home/link/nce_debug.log", O_WRONLY | O_APPEND, 0644);
+      if (mf2 >= 0)
+      {
+        char mb2[96];
+        int ml2 = std::snprintf(mb2, sizeof(mb2), "MIV: WR phys=%08x w=%d val=%08x\n",
+                                phys_fault, width, val);
+        ::write(mf2, mb2, static_cast<size_t>(ml2));
+        ::close(mf2);
+      }
+    }
+    else
+    {
+      int mf2 = open("/home/link/nce_debug.log", O_WRONLY | O_APPEND, 0644);
+      if (mf2 >= 0)
+      {
+        u32 rd_val = static_cast<u32>(ctx->uc_mcontext.regs->gpr[reg_dest]);
+        char mb2[96];
+        int ml2 = std::snprintf(mb2, sizeof(mb2), "MIV: RD phys=%08x w=%d val=%08x\n",
+                                phys_fault, width, rd_val);
+        ::write(mf2, mb2, static_cast<size_t>(ml2));
+        ::close(mf2);
+      }
+    }
     return;
   }
   else
@@ -2577,6 +2616,18 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
       const u32 rd = gi.RD;
       m_ppc_state.gpr[rd] = m_ppc_state.spr[spr_index];
       m_ppc_state.pc = pc_val + 4;
+      {
+        int sf = open("/home/link/nce_debug.log", O_WRONLY | O_APPEND, 0644);
+        if (sf >= 0)
+        {
+          char sb[128];
+          int sl = std::snprintf(sb, sizeof(sb),
+                                 "SPR: mftb spr=%u val=%08x rd=r%u pc=%08x\n",
+                                 spr_index, m_ppc_state.gpr[rd], rd, pc_val);
+          ::write(sf, sb, static_cast<size_t>(sl));
+          ::close(sf);
+        }
+      }
     }
     else
     {
@@ -2590,6 +2641,18 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
         const u32 rd = gi.RD;
         m_ppc_state.gpr[rd] = EmulateMFSpr(spr);
         m_ppc_state.pc = pc_val + 4;
+        {
+          int sf = open("/home/link/nce_debug.log", O_WRONLY | O_APPEND, 0644);
+          if (sf >= 0)
+          {
+            char sb[128];
+            int sl = std::snprintf(sb, sizeof(sb),
+                                   "SPR: mfspr spr=%u val=%08x rd=r%u pc=%08x\n",
+                                   spr, m_ppc_state.gpr[rd], rd, pc_val);
+            ::write(sf, sb, static_cast<size_t>(sl));
+            ::close(sf);
+          }
+        }
       }
       else if (opcd == 31 && gi.SUBOP10 == 467)
       {
@@ -2597,6 +2660,18 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
         const u32 rs = gi.RD;
         EmulateMTSpr(spr, static_cast<u32>(m_ppc_state.gpr[rs]));
         m_ppc_state.pc = pc_val + 4;
+        {
+          int sf = open("/home/link/nce_debug.log", O_WRONLY | O_APPEND, 0644);
+          if (sf >= 0)
+          {
+            char sb[128];
+            int sl = std::snprintf(sb, sizeof(sb),
+                                   "SPR: mtspr spr=%u val=%08x rs=r%u pc=%08x\n",
+                                   spr, static_cast<u32>(m_ppc_state.gpr[rs]), rs, pc_val);
+            ::write(sf, sb, static_cast<size_t>(sl));
+            ::close(sf);
+          }
+        }
       }
       else
       {
@@ -2663,6 +2738,19 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
       ctx->uc_mcontext.regs->gpr[reg_dest] = EmulateMFSpr(spr);
       ctx->uc_mcontext.regs->nip = u64(pc_val) + 4;
       continue_native = true;
+      {
+        int sf2 = open("/home/link/nce_debug.log", O_WRONLY | O_APPEND, 0644);
+        if (sf2 >= 0)
+        {
+          char sb2[128];
+          u32 rdv = static_cast<u32>(ctx->uc_mcontext.regs->gpr[reg_dest]);
+          int sl2 = std::snprintf(sb2, sizeof(sb2),
+                                  "SPR: mfspr spr=%u val=%08x rd=r%u pc=%08x\n",
+                                  spr, rdv, reg_dest, pc_val);
+          ::write(sf2, sb2, static_cast<size_t>(sl2));
+          ::close(sf2);
+        }
+      }
     }
     else if (xo == 467)
     {
@@ -2670,6 +2758,19 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
       EmulateMTSpr(spr, ctx->uc_mcontext.regs->gpr[reg_src]);
       ctx->uc_mcontext.regs->nip = u64(pc_val) + 4;
       continue_native = true;
+      {
+        int sf2 = open("/home/link/nce_debug.log", O_WRONLY | O_APPEND, 0644);
+        if (sf2 >= 0)
+        {
+          char sb2[128];
+          u32 wv = static_cast<u32>(ctx->uc_mcontext.regs->gpr[reg_src]);
+          int sl2 = std::snprintf(sb2, sizeof(sb2),
+                                  "SPR: mtspr spr=%u val=%08x rs=r%u pc=%08x\n",
+                                  spr, wv, reg_src, pc_val);
+          ::write(sf2, sb2, static_cast<size_t>(sl2));
+          ::close(sf2);
+        }
+      }
     }
     else if (xo == 83)
     {
