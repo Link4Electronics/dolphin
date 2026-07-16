@@ -676,15 +676,15 @@ void JitPPC64::ScanP0()
   auto& memory = m_system.GetMemory();
   const u32 ram_size_val = memory.GetRamSizeReal();
 
-  // Limit scan to the first 2 MB of RAM — covers all GC IPL + DOL text.
+  // Limit scan to the first 2 MB of RAM — covers early boot code + DOL text.
   // Scanning the full 24–32 MB picks up 10k+ false positives from data
-  // sections and NAND files that happen to match opcd==4.  The icbi-triggered
-  // rescan (m_p0_needs_rescan) will catch any dynamically loaded code
-  // beyond this range.
+  // sections and NAND files that happen to match opcd==4 (ps_* instructions).
+  // The icbi-triggered rescan (m_p0_needs_rescan) catches dynamically loaded
+  // code beyond this range.
   constexpr u32 CODE_SCAN_LIMIT = 0x200000u;  // 2 MB
-  const u32 scan_end = std::min(ram_size_val, CODE_SCAN_LIMIT);
+  const u32 first_2mb_end = std::min(ram_size_val, CODE_SCAN_LIMIT);
 
-  for (u32 offset = 0; offset + 4 <= scan_end; offset += 4)
+  for (u32 offset = 0; offset + 4 <= first_2mb_end; offset += 4)
   {
     const u32 addr = 0x80000000u + offset;
     u32 instr;
@@ -694,16 +694,34 @@ void JitPPC64::ScanP0()
       m_patched_p0[addr] = instr;
   }
 
-  NOTICE_LOG_FMT(POWERPC, "NCE: scanned {} MB of RAM, found {} P0 instructions",
-                 scan_end >> 20, m_patched_p0.size());
+  // Full RAM scan for NON-ps_* P0 patterns only (mtspr, mfspr, mtmsr,
+  // mfmsr, mftb, dcbz).  These opcode patterns (opcd=31, specific XO
+  // values) are extremely rare in data — false positives are vanishingly
+  // unlikely.  Covers the GC IPL loaded at 0x81200000 (K1 offset 0x01200000
+  // = 18 MB) which is beyond the 2 MB opcd=4 scan limit but contains
+  // critical mtspr/mfspr/mtmsr instructions that must be P0-trapped.
+  const u32 full_scan_end = std::min(ram_size_val, 0x01000000u);  // 16 MB
+  for (u32 offset = first_2mb_end; offset + 4 <= full_scan_end; offset += 4)
+  {
+    const u32 addr = 0x80000000u + offset;
+    u32 instr;
+    std::memcpy(&instr, reinterpret_cast<const void*>(static_cast<uintptr_t>(addr)),
+                sizeof(instr));
+    const u32 opcd = (instr >> 26) & 0x3F;
+    if (opcd != 4 && IsP0Instruction(instr))
+      m_patched_p0[addr] = instr;
+  }
 
-  // EXRAM scan (K1 block 1 at 0x90000000).  Same 2 MB limit.
+  NOTICE_LOG_FMT(POWERPC, "NCE: scanned {} MB of RAM, found {} P0 instructions",
+                 full_scan_end >> 20, m_patched_p0.size());
+
+  // EXRAM scan (K1 block 1 at 0x90000000).  Same 2 MB limit for opcd=4.
   const u32 exram_size_val = memory.GetExRamSizeReal();
   if (exram_size_val > 0)
   {
     const size_t before = m_patched_p0.size();
-    const u32 exram_scan_end = std::min(exram_size_val, CODE_SCAN_LIMIT);
-    for (u32 offset = 0; offset + 4 <= exram_scan_end; offset += 4)
+    const u32 exram_2mb_end = std::min(exram_size_val, CODE_SCAN_LIMIT);
+    for (u32 offset = 0; offset + 4 <= exram_2mb_end; offset += 4)
     {
       const u32 addr = 0x90000000u + offset;
       u32 instr;
@@ -712,8 +730,20 @@ void JitPPC64::ScanP0()
       if (IsP0Instruction(instr))
         m_patched_p0[addr] = instr;
     }
+    // Full EXRAM scan for non-ps_* patterns (16 MB limit).
+    const u32 exram_full_end = std::min(exram_size_val, 0x01000000u);
+    for (u32 offset = exram_2mb_end; offset + 4 <= exram_full_end; offset += 4)
+    {
+      const u32 addr = 0x90000000u + offset;
+      u32 instr;
+      std::memcpy(&instr, reinterpret_cast<const void*>(static_cast<uintptr_t>(addr)),
+                  sizeof(instr));
+      const u32 opcd = (instr >> 26) & 0x3F;
+      if (opcd != 4 && IsP0Instruction(instr))
+        m_patched_p0[addr] = instr;
+    }
     NOTICE_LOG_FMT(POWERPC, "NCE: scanned {} MB of EXRAM, found {} P0 instructions",
-                   exram_scan_end >> 20, m_patched_p0.size() - before);
+                   exram_full_end >> 20, m_patched_p0.size() - before);
   }
   // Generate AltiVec trampolines for ps_* arithmetic (fast path)
   GeneratePsTrampolines();
@@ -3237,6 +3267,7 @@ void JitPPC64::EmulateMTSpr(u32 spr, u32 val)
   default:
     if (spr >= 528 && spr <= 543)
     {
+      m_ppc_state.spr[spr] = val;
       bool upper = (spr % 2) == 0;
       const bool is_ibat = spr < 536;
       const u32 idx = is_ibat ? (spr - 528) / 2 : (spr - 536) / 2;
@@ -3254,9 +3285,8 @@ void JitPPC64::EmulateMTSpr(u32 spr, u32 val)
         else
           m_guest.dbatl[idx] = val;
       }
-      // Rebuild MMU translation tables — without this, m_dbat_table /
-      // m_ibat_table contain stale entries and subsequent memory accesses
-      // use wrong physical addresses.
+      // Rebuild MMU translation tables — m_dbat_table / m_ibat_table are
+      // derived from m_ppc_state.spr[], not from m_guest.*bat*.
       m_mmu.IBATUpdated();
       m_mmu.DBATUpdated();
       break;
