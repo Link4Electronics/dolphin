@@ -546,10 +546,30 @@ void JitPPC64::ScanDCBZ()
   NOTICE_LOG_FMT(POWERPC, "NCE: scanned RAM, found {} dcbz instructions",
                  m_patched_dcbz.size());
 
-  // EXRAM scan is REMOVED because NCE doesn't map the 0x90000000 EXRAM
-  // region.  Trying to read from unmapped NCE EXRAM would generate millions
-  // of SIGSEGV signals (64MB / 4 = 16M iterations × signal-handler latency).
-  // The RAM scan above already covers 0x80000000–0x81FFFFFF.
+  // EXRAM scan (K1 block 1 at 0x90000000).  The NCE mapping includes EXRAM
+  // through InitNCEGuestMapping, so reading directly is safe.
+  // For GC games (no EXRAM) this loops zero iterations.
+  const u32 exram_size_val = memory.GetExRamSizeReal();
+  if (exram_size_val > 0)
+  {
+    const size_t before = m_patched_dcbz.size();
+    for (u32 offset = 0; offset + 4 <= exram_size_val; offset += 4)
+    {
+      const u32 addr = 0x90000000u + offset;
+      u32 instr;
+      std::memcpy(&instr, reinterpret_cast<const void*>(static_cast<uintptr_t>(addr)),
+                  sizeof(instr));
+      const u32 opcd = (instr >> 26) & 0x3F;
+      if (opcd == 31)
+      {
+        const u32 xo = (instr >> 1) & 0x3FF;
+        if (xo == 1014)  // dcbz
+          m_patched_dcbz[addr] = instr;
+      }
+    }
+    NOTICE_LOG_FMT(POWERPC, "NCE: scanned EXRAM, found {} dcbz instructions",
+                   m_patched_dcbz.size() - before);
+  }
 
   // Add K2 aliases for all K1 patched addresses
   std::unordered_map<u32, u32> k2_aliases;
@@ -623,7 +643,12 @@ void JitPPC64::PatchAllDCBZ()
     __builtin___clear_cache(reinterpret_cast<char*>(0x70000000ULL),
                             reinterpret_cast<char*>(0x70000000ULL + ram_size_val));
   }
-  // EXRAM is not in the NCE mapping and has no patched dcbz — skip icache clear.
+  const u32 exram_size_val = memory.GetExRamSizeReal();
+  if (exram_size_val > 0)
+  {
+    __builtin___clear_cache(reinterpret_cast<char*>(0x90000000ULL),
+                            reinterpret_cast<char*>(0x90000000ULL + exram_size_val));
+  }
 
   m_dcbz_patches_applied = true;
 }
@@ -653,7 +678,12 @@ void JitPPC64::UnpatchAllDCBZ()
     __builtin___clear_cache(reinterpret_cast<char*>(0x70000000ULL),
                             reinterpret_cast<char*>(0x70000000ULL + ram_size_val));
   }
-  // EXRAM is not in the NCE mapping and has no patched dcbz — skip icache clear.
+  const u32 exram_size_val = memory.GetExRamSizeReal();
+  if (exram_size_val > 0)
+  {
+    __builtin___clear_cache(reinterpret_cast<char*>(0x90000000ULL),
+                            reinterpret_cast<char*>(0x90000000ULL + exram_size_val));
+  }
 
   m_dcbz_patches_applied = false;
 }
@@ -682,6 +712,24 @@ void JitPPC64::ScanP0()
 
   NOTICE_LOG_FMT(POWERPC, "NCE: scanned RAM, found {} P0 instructions",
                  m_patched_p0.size());
+
+  // EXRAM scan (K1 block 1 at 0x90000000).
+  const u32 exram_size_val = memory.GetExRamSizeReal();
+  if (exram_size_val > 0)
+  {
+    const size_t before = m_patched_p0.size();
+    for (u32 offset = 0; offset + 4 <= exram_size_val; offset += 4)
+    {
+      const u32 addr = 0x90000000u + offset;
+      u32 instr;
+      std::memcpy(&instr, reinterpret_cast<const void*>(static_cast<uintptr_t>(addr)),
+                  sizeof(instr));
+      if (IsP0Instruction(instr))
+        m_patched_p0[addr] = instr;
+    }
+    NOTICE_LOG_FMT(POWERPC, "NCE: scanned EXRAM, found {} P0 instructions",
+                   m_patched_p0.size() - before);
+  }
 
   // Generate AltiVec trampolines for ps_* arithmetic (fast path)
   GeneratePsTrampolines();
@@ -742,8 +790,25 @@ void JitPPC64::ScanP0()
 
 void JitPPC64::PatchAllP0()
 {
-  if (m_p0_patches_applied || m_patched_p0.empty())
+  if (m_p0_needs_rescan)
+  {
+    if (m_p0_patches_applied)
+      UnpatchAllP0();
+    m_patched_p0.clear();
+    m_ps_trampoline_map.clear();
+    m_p0_needs_rescan = false;
+    m_p0_patches_applied = false;
+    // Fall through to ScanP0() below since map is now empty
+  }
+
+  if (m_p0_patches_applied)
     return;
+  if (m_patched_p0.empty())
+  {
+    ScanP0();
+    if (m_patched_p0.empty())
+      return;
+  }
 
   for (const auto& [addr, orig] : m_patched_p0)
   {
@@ -770,6 +835,12 @@ void JitPPC64::PatchAllP0()
                             reinterpret_cast<char*>(0x80000000ULL + ram_size_val));
     __builtin___clear_cache(reinterpret_cast<char*>(0x70000000ULL),
                             reinterpret_cast<char*>(0x70000000ULL + ram_size_val));
+  }
+  const u32 exram_size_val = memory.GetExRamSizeReal();
+  if (exram_size_val > 0)
+  {
+    __builtin___clear_cache(reinterpret_cast<char*>(0x90000000ULL),
+                            reinterpret_cast<char*>(0x90000000ULL + exram_size_val));
   }
 
   m_p0_patches_applied = true;
@@ -798,6 +869,12 @@ void JitPPC64::UnpatchAllP0()
                             reinterpret_cast<char*>(0x80000000ULL + ram_size_val));
     __builtin___clear_cache(reinterpret_cast<char*>(0x70000000ULL),
                             reinterpret_cast<char*>(0x70000000ULL + ram_size_val));
+  }
+  const u32 exram_size_val = memory.GetExRamSizeReal();
+  if (exram_size_val > 0)
+  {
+    __builtin___clear_cache(reinterpret_cast<char*>(0x90000000ULL),
+                            reinterpret_cast<char*>(0x90000000ULL + exram_size_val));
   }
 
   m_p0_patches_applied = false;
@@ -2847,9 +2924,9 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
     }
     ctx->uc_mcontext.regs->nip = u64(m_ppc_state.pc);
 
-    // Return to guest code (sigreturn restores the ucontext with host
-    // registers in place, so the guest continues at the updated PC).
-    RestoreHostRegsInContext(uctx);
+    // Continue native execution — the ucontext now has the corrected
+    // GPRs, CR, LR, CTR, XER, and PC from the inline handler above.
+    // sigreturn resumes guest code natively at the next instruction.
     return;
   }
 
@@ -2972,7 +3049,10 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
       // the next NCE entry — otherwise they execute natively on PPC970,
       // zeroing 128 bytes instead of Gekko's 32.
       if (xo == 982)  // icbi
+      {
         m_dcbz_needs_rescan = true;
+        m_p0_needs_rescan = true;
+      }
     }
   }
   else if (opcd == 19 && xo == 50)

@@ -200,6 +200,7 @@ private:
   // P0 → trap patch state
   std::unordered_map<u32, u32> m_patched_p0;
   bool m_p0_patches_applied = false;
+  bool m_p0_needs_rescan = false;
 
   // DCR (Device Control Register) bus state — written by mtdcr, read by mfdcr
   // Initialized in constructor to 0xFFFFFFFF (all bits set = ready).
