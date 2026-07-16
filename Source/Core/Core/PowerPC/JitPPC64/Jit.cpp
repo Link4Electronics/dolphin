@@ -136,6 +136,9 @@ JitPPC64::~JitPPC64() { Shutdown(); }
 
 static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
 {
+  fprintf(stderr, "JITPROBE: SIGSEGV at addr=0x%lx\n",
+          (unsigned long)info->si_addr);
+
   auto* uc = static_cast<ucontext_t*>(ucontext_arg);
   auto* ctx = &uc->uc_mcontext;
 
@@ -150,6 +153,12 @@ static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
   sa_default.sa_handler = SIG_DFL;
   sigaction(SIGSEGV, &sa_default, nullptr);
   raise(SIGSEGV);
+}
+
+static void DebugCrashHandler(int sig, siginfo_t* info, void* ctx)
+{
+  fprintf(stderr, "JITPROBE: CRASH signal=%d addr=%p\n", sig, info->si_addr);
+  _exit(1);
 }
 
 void JitPPC64::Init()
@@ -388,6 +397,15 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
 
   fprintf(stderr, "JITPROBE: compiled block at 0x%08X, %u instrs, size=%zu bytes, next=0x%08X\n",
           em_address, code_block.m_num_instructions, m_asm.Size(), nextPC);
+  for (u32 i = 0; i < code_block.m_num_instructions; ++i)
+  {
+    if (!m_code_buffer[i].skip)
+    {
+      u32 addr = m_code_buffer[i].address;
+      u32 hex = m_code_buffer[i].inst.hex;
+      fprintf(stderr, "  [%02u] 0x%08X: 0x%08X\n", i, addr, hex);
+    }
+  }
 }
 
 // ===========================================================================
@@ -401,15 +419,37 @@ void JitPPC64::Run()
   auto& interpreter = m_system.GetInterpreter();
   u64 probe_count = 0;
 
+  fprintf(stderr, "JITPROBE: Run() entered, pc=0x%08X dc=%d state=%d\n",
+          m_ppc_state.pc, m_ppc_state.downcount, static_cast<int>(cpu.GetState()));
+
+  // DEBUG: catch crashes in compiled code
+  struct sigaction crash_sa;
+  std::memset(&crash_sa, 0, sizeof(crash_sa));
+  crash_sa.sa_sigaction = DebugCrashHandler;
+  crash_sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+  sigemptyset(&crash_sa.sa_mask);
+  sigaction(SIGSEGV, &crash_sa, nullptr);
+  sigaction(SIGILL, &crash_sa, nullptr);
+  sigaction(SIGFPE, &crash_sa, nullptr);
+  sigaction(SIGTRAP, &crash_sa, nullptr);
+
   while (cpu.GetState() == CPU::State::Running)
   {
     core_timing.Advance();
 
+    fprintf(stderr, "JITPROBE: outer iter, pc=0x%08X dc=%d\n",
+            m_ppc_state.pc, m_ppc_state.downcount);
+
     while (m_ppc_state.downcount > 0 && cpu.GetState() == CPU::State::Running)
+    {
+      fprintf(stderr, "JITPROBE: inner top, pc=0x%08X dc=%d\n",
+              m_ppc_state.pc, m_ppc_state.downcount);
     {
       JitBlock* block = m_block_cache.GetBlockFromStartAddress(m_ppc_state.pc, m_ppc_state.feature_flags);
       if (!block)
       {
+        fprintf(stderr, "JITPROBE: compile block at 0x%08X, CTR=0x%08X\n",
+                m_ppc_state.pc, m_ppc_state.spr[9]);
         Jit(m_ppc_state.pc);
         block = m_block_cache.GetBlockFromStartAddress(m_ppc_state.pc, m_ppc_state.feature_flags);
       }
@@ -420,6 +460,8 @@ void JitPPC64::Run()
         u32 pc_before = m_ppc_state.pc;
         func();
         u32 pc_after = m_ppc_state.pc;
+        fprintf(stderr, "JITPROBE: after block, pc 0x%08X -> 0x%08X (dc=%d)\n",
+                pc_before, pc_after, m_ppc_state.downcount);
         m_ppc_state.downcount -= static_cast<int>(block->originalSize);
         if (++probe_count % 1000 == 1)
           fprintf(stderr, "JITPROBE: pc 0x%08X -> 0x%08X (blocks=%llu, dc=%d)\n",
@@ -438,7 +480,8 @@ void JitPPC64::Run()
       }
     }
   }
-}
+  }  // nested scope (extra brace)
+}  // Run()
 
 void JitPPC64::SingleStep()
 {
