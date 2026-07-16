@@ -393,7 +393,13 @@ void JitPPC64::GeneratePsTrampolines()
 
   m_ps_trampoline_next = base;
 
-  for (u32 offset = 0; offset + 4 <= ram_size; offset += 4)
+  // Same 2 MB limit as ScanP0 — ps_* instructions beyond the code region
+  // are executed natively as AltiVec (wrong semantics but won't crash).
+  // The icbi-triggered rescan covers dynamically loaded code.
+  constexpr u32 CODE_SCAN_LIMIT = 0x200000u;
+  const u32 ps_scan_end = std::min(ram_size, CODE_SCAN_LIMIT);
+
+  for (u32 offset = 0; offset + 4 <= ps_scan_end; offset += 4)
   {
     const u32 addr = 0x80000000u + offset;
     u32 instr;
@@ -700,7 +706,15 @@ void JitPPC64::ScanP0()
   auto& memory = m_system.GetMemory();
   const u32 ram_size_val = memory.GetRamSizeReal();
 
-  for (u32 offset = 0; offset + 4 <= ram_size_val; offset += 4)
+  // Limit scan to the first 2 MB of RAM — covers all GC IPL + DOL text.
+  // Scanning the full 24–32 MB picks up 10k+ false positives from data
+  // sections and NAND files that happen to match opcd==4.  The icbi-triggered
+  // rescan (m_p0_needs_rescan) will catch any dynamically loaded code
+  // beyond this range.
+  constexpr u32 CODE_SCAN_LIMIT = 0x200000u;  // 2 MB
+  const u32 scan_end = std::min(ram_size_val, CODE_SCAN_LIMIT);
+
+  for (u32 offset = 0; offset + 4 <= scan_end; offset += 4)
   {
     const u32 addr = 0x80000000u + offset;
     u32 instr;
@@ -710,15 +724,16 @@ void JitPPC64::ScanP0()
       m_patched_p0[addr] = instr;
   }
 
-  NOTICE_LOG_FMT(POWERPC, "NCE: scanned RAM, found {} P0 instructions",
-                 m_patched_p0.size());
+  NOTICE_LOG_FMT(POWERPC, "NCE: scanned {} MB of RAM, found {} P0 instructions",
+                 scan_end >> 20, m_patched_p0.size());
 
-  // EXRAM scan (K1 block 1 at 0x90000000).
+  // EXRAM scan (K1 block 1 at 0x90000000).  Same 2 MB limit.
   const u32 exram_size_val = memory.GetExRamSizeReal();
   if (exram_size_val > 0)
   {
     const size_t before = m_patched_p0.size();
-    for (u32 offset = 0; offset + 4 <= exram_size_val; offset += 4)
+    const u32 exram_scan_end = std::min(exram_size_val, CODE_SCAN_LIMIT);
+    for (u32 offset = 0; offset + 4 <= exram_scan_end; offset += 4)
     {
       const u32 addr = 0x90000000u + offset;
       u32 instr;
@@ -727,8 +742,8 @@ void JitPPC64::ScanP0()
       if (IsP0Instruction(instr))
         m_patched_p0[addr] = instr;
     }
-    NOTICE_LOG_FMT(POWERPC, "NCE: scanned EXRAM, found {} P0 instructions",
-                   m_patched_p0.size() - before);
+    NOTICE_LOG_FMT(POWERPC, "NCE: scanned {} MB of EXRAM, found {} P0 instructions",
+                   exram_scan_end >> 20, m_patched_p0.size() - before);
   }
 
   // Generate AltiVec trampolines for ps_* arithmetic (fast path)
@@ -827,20 +842,23 @@ void JitPPC64::PatchAllP0()
     }
   }
 
-  auto& memory = m_system.GetMemory();
-  const u32 ram_size_val = memory.GetRamSizeReal();
-  if (ram_size_val > 0)
+  // Clear icache for patched regions.  Only cover the scan range (2 MB) —
+  // not the full 24 MB RAM or 64 MB EXRAM — to avoid millions of cache-line
+  // invalidations on every icbi-triggered rescan.
+  constexpr u32 PATCH_CACHE_LIMIT = 0x200000u;
+  const u32 ram_size = std::min(m_system.GetMemory().GetRamSizeReal(), PATCH_CACHE_LIMIT);
+  if (ram_size > 0)
   {
     __builtin___clear_cache(reinterpret_cast<char*>(0x80000000ULL),
-                            reinterpret_cast<char*>(0x80000000ULL + ram_size_val));
+                            reinterpret_cast<char*>(0x80000000ULL + ram_size));
     __builtin___clear_cache(reinterpret_cast<char*>(0x70000000ULL),
-                            reinterpret_cast<char*>(0x70000000ULL + ram_size_val));
+                            reinterpret_cast<char*>(0x70000000ULL + ram_size));
   }
-  const u32 exram_size_val = memory.GetExRamSizeReal();
-  if (exram_size_val > 0)
+  const u32 exram_size = std::min(m_system.GetMemory().GetExRamSizeReal(), PATCH_CACHE_LIMIT);
+  if (exram_size > 0)
   {
     __builtin___clear_cache(reinterpret_cast<char*>(0x90000000ULL),
-                            reinterpret_cast<char*>(0x90000000ULL + exram_size_val));
+                            reinterpret_cast<char*>(0x90000000ULL + exram_size));
   }
 
   m_p0_patches_applied = true;
@@ -861,20 +879,21 @@ void JitPPC64::UnpatchAllP0()
     std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), &orig, sizeof(orig));
   }
 
-  auto& memory = m_system.GetMemory();
-  const u32 ram_size_val = memory.GetRamSizeReal();
-  if (ram_size_val > 0)
+  // Clear icache for patched regions — same limited range as PatchAllP0.
+  constexpr u32 PATCH_CACHE_LIMIT = 0x200000u;
+  const u32 ram_size = std::min(m_system.GetMemory().GetRamSizeReal(), PATCH_CACHE_LIMIT);
+  if (ram_size > 0)
   {
     __builtin___clear_cache(reinterpret_cast<char*>(0x80000000ULL),
-                            reinterpret_cast<char*>(0x80000000ULL + ram_size_val));
+                            reinterpret_cast<char*>(0x80000000ULL + ram_size));
     __builtin___clear_cache(reinterpret_cast<char*>(0x70000000ULL),
-                            reinterpret_cast<char*>(0x70000000ULL + ram_size_val));
+                            reinterpret_cast<char*>(0x70000000ULL + ram_size));
   }
-  const u32 exram_size_val = memory.GetExRamSizeReal();
-  if (exram_size_val > 0)
+  const u32 exram_size = std::min(m_system.GetMemory().GetExRamSizeReal(), PATCH_CACHE_LIMIT);
+  if (exram_size > 0)
   {
     __builtin___clear_cache(reinterpret_cast<char*>(0x90000000ULL),
-                            reinterpret_cast<char*>(0x90000000ULL + exram_size_val));
+                            reinterpret_cast<char*>(0x90000000ULL + exram_size));
   }
 
   m_p0_patches_applied = false;
