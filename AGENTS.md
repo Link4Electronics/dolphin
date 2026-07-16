@@ -707,6 +707,172 @@ The translator would need:
 
 For a typical game with <100 PS instructions per frame: trap approach loses ~0.5ms to PS signal overhead per frame — negligible against 16.6ms frame budget. For PS-heavy scenes (SMG starbit effects, MKDD particle rendering), the loss could reach 2-3ms — still playable.
 
-## Commit Strategy
+## Session 2026-07-16: JITPPC64 File Split + Build Fixes
 
-Each functional area (Swap.h, Blob readers, Volume code, Boot code) should be committed separately for clarity. Use descriptive messages prefixed with `[PPC64-BE]`.
+### Monolithic → Split
+
+`JitPPC64/Jit.cpp` (~1100 lines) split into:
+
+| File | Purpose |
+|------|---------|
+| `Jit.h` | Class declarations, register conventions, constants |
+| `Jit.cpp` | Core: prolog/epilog, Jit(), Run(), SingleStep(), EraseSingleBlock, Helpers |
+| `JitPPC64_Tables.cpp` | `CanCompileInstruction()`, `CompileInstruction()` dispatch |
+| `JitPPC64_Integer.cpp` | `CompileADDI`, `CompileADDIS`, `CompileADDIC`, `CompileADDIC_`, `CompileMULLI`, `CompileANDI_`, `CompileANDIS_`, `CompileORI`, `CompileORIS`, `CompileXORI`, `CompileXORIS`, `CompileCMPI`, `CompileCMPLI`, `CompileTable31`, `CompileTable31_Integer` |
+| `JitPPC64_LoadStore.cpp` | `CompileLoadStore` (lwz/lbz/lhz/lha/stw/stb/sth + indexed forms) |
+| `JitPPC64_Branch.cpp` | `CompileB` (bl stores LR), `CompileBC` (CTR+CR runtime evaluation, no forward refs) |
+| `JitPPC64_SystemRegisters.cpp` | `CompileMFCR`, `CompileMTCRF`, `CompileMFSPR`, `CompileMTSPR`, `CompileMFMSR`, `CompileMTMSR`, `CompileMFTB`, `CompileTW`, `CompileTable31_SystemReg` |
+| `JitPPC64_RegCache.h` | `JitPPC64RegCache` struct (18 host GPRs, dirty tracking) |
+| `JitPPC64_RegCache.cpp` | `R()`/`W()`/`Flush()`/`Reset()`/`FindFreeHostReg()` |
+| `JitPPC64_BackPatch.cpp` | `InitBackpatch()`/`ShutdownBackpatch()`/`AddBackpatchEntry()`/`HandleFault()` |
+| `JitPPC64_Paired.cpp` | `CompilePairedSingle` — AltiVec-accelerated ps\_add/sub/mul/div |
+| `PPC64Assembler.h` | Full PPC64 assembler with AltiVec (already existed, now confirmed complete) |
+
+### Build Errors Fixed
+
+| # | Error | File | Fix |
+|---|-------|------|-----|
+| 1 | `PowerPCState` does not name a type | Branch.cpp, Integer.cpp, SystemRegisters.cpp, RegCache.cpp, Jit.cpp, Paired.cpp | `offsetof(PowerPCState, ...)` → `offsetof(PowerPC::PowerPCState, ...)` |
+| 2 | `CTX_NIP` not found on PPC64 | BackPatch.cpp | Added `#define CTX_NIP regs->nip` in MachineContext.h for `_M_PPC_64` (PPC64 musl: `mcontext_t` → `struct sigcontext` → `regs` → `struct pt_regs` → `nip`) |
+| 3 | `JitBlock` has no `codeSize` | Jit.cpp | Replaced `b->codeSize = 0` with `b->near_begin = b->near_end = block_start`. Removed `b->codeSize = ...` (already set by `near_end`). |
+| 4 | `GetBlockFromStartAddress` needs 2 args | Jit.cpp | Added `m_ppc_state.feature_flags` as second argument |
+| 5 | `EraseBlock` no such method | Jit.cpp | `m_block_cache.EraseBlock(...)` → `m_block_cache.EraseSingleBlock(block)` |
+| 6 | `m_dispatcher_entry` private | Jit.h | Added `friend class JitPPC64BlockCache;` |
+
+### `JitPPC64_Paired.cpp` — AltiVec Accelerator
+
+- Handles opcd 4 (Paired Singles) with `SUBOP5` dispatch
+- `LoadFPRPairToVR`: extracts Gekko u64 pair (ps0:upper32, ps1:lower32) → 16-byte memory → `LVX` into AltiVec VR
+- `StoreVRToFPRPair`: `STVX` → LWZ halves → pack u64 → STD to `ppcState.ps[fr]`
+- Emits `VADDFP`/`VSUBFP`/`VMULFP`/`VDIVFP` for ps\_add/sub/mul/div
+- Other ps\_\* instructions via `SUBOP5` still fall back to interpreter
+
+### Register Conventions (unchanged from before)
+
+| Register | Purpose |
+|----------|---------|
+| r12 | `ppcState` base pointer |
+| r0  | Scratch (REG\_SCRATCH) |
+| r11 | Scratch (REG\_SCRATCH2) |
+| r14-31 | Cached PPC GPRs (via RegCache) |
+| r1  | Host stack pointer |
+
+## Session 2026-07-16: JIT GCC Opcode Coverage Expansion
+
+### Changes Summary
+
+| # | Change | Files |
+|---|--------|-------|
+| 1 | **Rewrote `CompileBC`** — uses r10 as not-taken flag (0=taken, ≠0=not-taken) with fixed-offset `BC(12/4, 2, 8)` skip patterns; no forward references needed | `JitPPC64_Branch.cpp` |
+| 2 | **Fixed CA extraction** — `addcx`/`addic` used `RLWINM(...,0,0,0)` which keeps bit 31; `STB` stores low byte → always 0. Fix: `RLWINM(...,1,31,31)` shifts bit 31→bit 0 before STB. `subfcx` CA inverted `!GT` from `CMPLW`. | `JitPPC64_Integer.cpp` |
+| 3 | **Fixed `EmitCR0Update()`** — reads result from `REG_SCRATCH` (r0), not `REG_SCRATCH2` (r11) | `Jit.cpp` |
+| 4 | **Added assembler functions**: `ADDE`, `SUBFZE`, `ADDZE`, `SUBFME`, `ADDME` | `PPC64Assembler.h` |
+| 5 | **New opcodes implemented**: `CompileSubfic`, `CompileTWI` (nop), `CompileRLWINM`, `CompileRLWIMI`, `CompileRLWNM`, `negx`, `subfcx` (with CA), `extswx` | `JitPPC64_Integer.cpp`, `JitPPC64_Rotate.cpp` |
+| 6 | **Added branch/link ops**: `CompileBCLR`, `CompileBCCTR` — same r10 flag pattern as `CompileBC`; LR/CTR masked to 30 bits via `RLWINM(...,0,0,29)` | `JitPPC64_Branch.cpp` |
+| 7 | **Added native CR ops**: `CompileMCRF` (native `MCRF`), `CompileCRLogical` (native `CRAND`/`CROR`/`CRXOR`/etc. — PPC970 has native CR bit-logic, no SIGILL), `CompileOPCD19` dispatcher routing SUBOP10 0/33-129-193-225-257-289-417-449/16/528 | `JitPPC64_Branch.cpp` |
+| 8 | **Fixed duplicate `addex` case**: removed first attempt (lines 223-237), kept clean `return false` at second instance; added missing `return false` to prevent fallthrough to `subfx` | `JitPPC64_Integer.cpp` |
+| 9 | **Updated Tables.cpp**: added dispatch for all new opcodes in `CompileInstruction`; `CanCompileInstruction` includes CR logical (SUBOP10 33-449) and mcrf (0) in opcd 19 | `JitPPC64_Tables.cpp` |
+| 10 | **Jit.h**: added declarations for `CompileOPCD19`, `CompileBCLR`, `CompileBCCTR`, `CompileCRLogical`, `CompileMCRF`, `CompileRLWINM`, `CompileRLWIMI`, `CompileRLWNM`, `CompileSubfic`, `CompileTWI` | `Jit.h` |
+
+### Key Design Decisions
+
+- **No forward references in assembler**: `PPC64Assembler` has no `GetCodePtr()`/`SetCodePtr()`. Conditional branches use `BC(bo, bi, 8)` with bd=8 to skip exactly 1 instruction (4 bytes), combined with r10 as not-taken flag.
+- **CR logical ops are native PPC970**: The 8 CR logical ops (`crand`, `cror`, `crxor`, `crnand`, `crnor`, `creqv`, `crandc`, `crorc`) are standard PPC ISA, not Gekko-specific. PPC970 implements them natively — no SIGILL. Emit directly via `CRAND()`/`CROR()`/etc.
+- **CA-using ops excluded from JIT**: `adde`, `subfe`, `addze`, `subfze`, `addme`, `subfme`, `mcrxr` need XER[CA] read before computation and write after. `CanCompileInstruction` returns false → entire block falls to interpreter (no silent wrong results).
+- **MCRF is native**: `MCRF(crD, crS)` is a standard PPC970 instruction — emit directly.
+
+## Session 2026-07-16: Full JIT Backend — FPU, Load/Store, Branch, Rotate, System Registers
+
+### New Files
+| File | Purpose |
+|------|---------|
+| `JitPPC64_FPU.cpp` | opcd 59 (single-precision) + opcd 63 (double-precision) — all A-form/X-form/FPSCR ops |
+| `JitPPC64_Rotate.cpp` | rlwinm/rlwimi/rlwnm |
+
+### Extended Files
+| File | What was added |
+|------|----------------|
+| `JitPPC64_LoadStore.cpp` | All D-form integer loads/stores (32-45), FPU loads/stores (48-55), indexed X-form (opcd 31 XO 23-918), byte-reversed (534/662/790/918), stfiwx (983), lmw/stmw excluded |
+| `JitPPC64_Branch.cpp` | opcd 19 dispatcher — CompileBCLR, CompileBCCTR, CompileMCRF, CompileCRLogical, CompileISYNC (150), CompileRFI (50 → fallback) |
+| `JitPPC64_SystemRegisters.cpp` | CompileMisc — cache/barrier (dcbst/dcbf/dcbt/dcbtst/dcbi/sync/eieio/icbi), isync, sc, rfi |
+| `JitPPC64_Tables.cpp` | `CanCompileInstruction` covers all FPU, indexed loads, cache/misc, CR logical; excludes CA-using ops, dcbz (128B vs 32B), lmw/stmw, sc/rfi |
+| `Jit.cpp` | CompileTable31 chain: Integer→SystemReg→LoadStore→Misc; EmitCR0Update fix |
+| `Jit.h` | All declarations for new functions |
+| `PPC64Assembler.h` | Added LWBRX/STWBRX/LHBRX/STHBRX/STFIWX, LFS/LFD/LFSX/LFDX/STFS/STFD/STFSX/STFDX, all FPU arithmetic/compare/convert/FPSCR, A-form helper |
+| `CMakeLists.txt` | Added JitPPC64_FPU.cpp, JitPPC64_Rotate.cpp |
+
+### JIT Coverage Summary
+| Category | Coverage | Notes |
+|----------|----------|-------|
+| Integer ALU (D-form) | **All** addi/addis/addic/addic_/mulli/subfic/cmpi/cmpli/andi_/andis_/ori/oris/xori/xoris | 10/10 |
+| Integer ALU (X-form) | **All** (add/adc/adde/addo/sub/subf/subfc/subfe/subfze/subfme/neg/mulhw/mulhwu/mullw/divw/divwu/extsb/extsh/extsw/and/or/xor/nand/nor/eqv/slw/srw/sraw/srawi/cntlzw/tw/twi) | CA-using excluded (adde/subfe/addze/subfze/addme/subfme/mcrxr) |
+| Rotate | **All** rlwinm/rlwimi/rlwnm | 3/3 |
+| Load/Store (D-form) | **All** lwz/lbzu/lhz/lha/lhau/stw/stwu/stb/stbu/sth/sthu/lfs/lfd/stfs/stfd + update forms | lmw/stmw excluded (46/47) |
+| Load/Store (X-form) | **All** lwzx/lbzux/lhzx/lhax/stwx/stbx/sthx + update, lwbrx/stwbrx/lhbrx/sthbrx, stfiwx | |
+| Branch | **All** b/bl, bc/bcl, bclr/bclrl, bcctr/bcctrl | |
+| CR Logical | **All 8 native** crand/cror/crxor/crnand/crnor/creqv/crandc/crorc + mcrf | Native PPC970 |
+| FPU (single, opcd 59) | **All** fadds/fsubs/fdivs/fres/fmuls/fmadds/fmsubs/fnmadds/fnmsubs | 9/9 |
+| FPU (double, opcd 63) | **All** fadd/fsub/fdiv/fmul/frsp/fsel/frsqrte/fmadd/fmsub/fnmadd/fnmsub/fmr/fneg/fabs/fnabs/fctiw/fctiwz/fcmpu/fcmpo/mffs/mtfsf/mtfsfi/mtfsb0/mtfsb1 | |
+| Cache/Barrier | **All native** dcbst/dcbf/dcbt/dcbtst/dcbi/dcbz/excluded/sync/eieio/icbi | dcbz excluded (128B ≠ 32B) |
+| System Register | **All** mfcr/mtcrf/mfspr/mtspr/mfmsr/mtmsr/mftb | sc/rfi excluded |
+| Paired Singles | ps\_add/sub/mul/mr/abs/neg/nabs via AltiVec trampoline; remainder via trap→interpreter | psq\_l/psq\_st excluded |
+
+### CA-Using Ops Implementation
+
+**Date:** 2026-07-16 — `CompileTable31_CA` added in `JitPPC64_Integer.cpp`
+
+| XO | Op | Formula | Approach |
+|----|----|---------|----------|
+| 136 | subfe | rd = rb + ~ra + CA | 32-bit NOT (XOR with 0xFFFFFFFF), 64-bit ADD, RLDICL extract carry |
+| 138 | adde | rd = ra + rb + CA | 64-bit ADD, RLDICL extract carry |
+| 200 | subfze | rd = ~ra + CA | Same as subfe without rb |
+| 202 | addze | rd = ra + CA | 64-bit ADD, RLDICL |
+| 232 | subfme | rd = ~ra + CA + 0xFFFFFFFF | 32-bit NOT + ADD with 0xFFFFFFFF |
+| 234 | addme | rd = ra + CA + 0xFFFFFFFF | ADD with 0xFFFFFFFF |
+
+**Key:** All use 64-bit arithmetic on zero-extended operands. The 32-bit carry is extracted via `RLDICL(rd, rs, 32, 63)` which rotates bit 32 (the carry) to the LSB. Results and carry stored independently. Rc bit updates CR0 via `EmitCR0Update()`. `mcrxr` (XO=512) remains block-level fallback (complex CR field construction from XER).
+
+### JIT Coverage Summary
+All Gekko integer ALU, FPU, load/store, branch, CR logical, paired single (all ps\_*) instructions are now compiled. Remaining fallbacks:
+
+| Instruction | Reason |
+|-------------|--------|
+| **ps\_cmpu0/ps\_cmpo0/ps\_cmpu1/ps\_cmpo1** | Set CR1 — complex CR construction; trap→interpreter |
+| **psq\_l/st integer types** | Quantize types != 0 (U8/U16/S8/S16) — block-level interpreter fallback |
+| **dcbz** | Emulated with 8 word-stores (32B → 128B mismatch) |
+| **lmw/stmw** | Implemented with loops |
+| **sc/rfi** | System call / return from interrupt — interpreter needed |
+| **dcbz\_l** (opcd 4, xo=1014) | Locked cache dcbz — falls under opcd 4 PairedSingle default → false
+
+## Session 2026-07-18: PPC64Assembler.h Encoder Bugs (Critical)
+
+### Fixed Encoder Bugs in `PPC64Assembler.h`
+
+| Bug | Line | Symptom | Fix |
+|-----|------|---------|-----|
+| **RLDICR/RLDICL** | 243-258 | Emitted `((sh>>5)<<2)` and `(me<<1)` — wrong bit positions. CLR32 produced `rldicl r12,r12,0,1` (mb=1) instead of mb=32. Prolog produced `rldimi` instead of `rldicr`. | Use correct MD-form: `(sh&0x1F)<<11`, `(me&0x1F)<<6`, `(sh>>5)<<4`, `(me>>5)<<3`, xo at bits 2-1. |
+| **DS macro** | 382-387 | `(ds_enc << 16)` placed 14-bit offset at u32 bits 29:16 (PPC bits 2:15) instead of u32 bits 15:2 (PPC bits 16:29). `STD r1,r1,-128` produced instruction with opcd=63, RS=31. | Use `(ds_enc << 2)` to correctly place at u32 bits 15:2. |
+| **XL macro** | 393-397 | `(xo << 2)` placed 10-bit xo at u32 bits 11:2 (PPC bits 20:29) instead of u32 bits 10:1 (PPC bits 21:30). CRAND with xo=257 emitted 0b1000000010 instead of 0b0100000001. | Use `(xo << 1)` to correctly place at u32 bits 10:1. |
+
+| **B** (I-form) | `B()` | `(aa << 30)` / `(lk << 31)` at opcode bits, LI at `u32[23:0]` instead of `u32[25:2]` | Use `(aa << 1)`, `lk`, `(LI << 2)` at `u32[25:2]` |
+| **BC** (B-form) | `BC()` | `(aa << 30)` / `(lk << 31)` at opcode bits, BD at `u32[12:0]` instead of `u32[15:2]` (collides with AA/LK field) | Use `(aa << 1)`, `(lk << 1)`, `(BD_enc << 2)` at `u32[15:2]` |
+
+### Remaining D-form swap bug (found in second pass)
+
+`Jit.cpp:219` — `LD(REG_SCRATCH, 16, 1)` → `LD(REG_SCRATCH, 1, 16)`. The epilog attempted to load from `0(r16)` instead of `16(r1)`, corrupting the return address of every compiled block.
+
+### BC(12,2,8) skip-pattern bug (most critical remaining)
+
+The `BC()` assembler function's broken BD encoding placed the 3-bit value `(8>>2)=2` at `u32[1:0]` (PPC bits 30-31 = AA/LK fields) instead of `u32[15:2]` (PPC bits 16-29 = BD field). **Every `BC(bo, bi, 8)` called in the JIT emitted `AA=1, BD=0` → "branch always to absolute address 0"** instead of the intended "skip one instruction" (offset 8 bytes).
+
+Impact: ALL 13 conditional skip patterns in `JitPPC64_Branch.cpp` branched to address 0 on the first conditional check (CTR or CR), causing the interpreter to execute garbage at unmapped address 0, breaking every conditional branch in every compiled block. This was the root cause of "JIT doesn't progress boot" — every block with a conditional branch would immediately jump to address 0 and fail.
+
+### Impact of Fixes
+
+With all three encoder bugs fixed + the final LD arg swap fix, the JIT should now emit **correct PPC64 instructions** for:
+- Every integer ALU operation (via CLR32 zero-extension)
+- The prolog (ppcState address via RLDICR)
+- Every stack frame save/restore (via DS-form LD/STD)
+- Every conditional branch (via XL-form CR logical ops and B-form BC skip patterns)
+- Every CR read/write (via MFCR/MTCRF)
+- Every FPU and AltiVec operation

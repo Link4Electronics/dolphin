@@ -675,6 +675,18 @@ elseif(_M_PPC_64)
     PowerPC/JitPPC64/JitAsm.cpp
     PowerPC/JitPPC64/JitAsm.h
     PowerPC/JitPPC64/JitAsm.S
+    PowerPC/JitPPC64/JitPPC64_BackPatch.cpp
+    PowerPC/JitPPC64/JitPPC64_Branch.cpp
+    PowerPC/JitPPC64/JitPPC64_FPU.cpp
+    PowerPC/JitPPC64/JitPPC64_Integer.cpp
+    PowerPC/JitPPC64/JitPPC64_LoadStore.cpp
+    PowerPC/JitPPC64/JitPPC64_Rotate.cpp
+    PowerPC/JitPPC64/JitPPC64_RegCache.cpp
+    PowerPC/JitPPC64/JitPPC64_RegCache.h
+    PowerPC/JitPPC64/JitPPC64_SystemRegisters.cpp
+    PowerPC/JitPPC64/JitPPC64_Paired.cpp
+    PowerPC/JitPPC64/JitPPC64_Tables.cpp
+    PowerPC/JitPPC64/PPC64Assembler.h
   )
 endif()
 

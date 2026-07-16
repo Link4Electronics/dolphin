@@ -134,7 +134,8 @@ typedef mcontext_t SContext;
 #define CTX_SP sp
 #define CTX_PC pc
 #elif defined(_M_PPC_64)
-// PPC64: no CTX macros needed — JitPPC64 uses ucontext directly
+// PPC64: pt_regs.nip via struct sigcontext.regs pointer
+#define CTX_NIP regs->nip
 #else
 #error No context definition for architecture
 #endif
