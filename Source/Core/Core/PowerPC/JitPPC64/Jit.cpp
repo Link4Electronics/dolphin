@@ -2508,31 +2508,110 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
                     static_cast<u32>(ctx->uc_mcontext.regs->gpr[rb] & 0xFFFFFFFF)) &
                    ~31u;  // dcbz aligns to 32-byte cache line boundary
 
-    // Zero 32 bytes at EA in emulated memory (async-signal-safe).
     auto& mem = m_system.GetMemory();
     const u32 ram_size_v = mem.GetRamSizeReal();
     const u32 exram_size_v = mem.GetExRamSizeReal();
     const u32 masked = ea & 0x3FFFFFFF;
-    bool zeroed = false;
-    if (masked + 32 <= ram_size_v)
+
+    // === Optimize dcbz loop: detect dcbz; addi rN, rN, 32; bdnz+ ===
+    // When the game clears a large memory range via the idiom:
+    //   dcbz 0, rN        (patched, traps here)
+    //   addi rN, rN, 32   advance to next line
+    //   bdnz+ loop        decrement CTR, branch back if non-zero
+    // we emulate the entire remaining loop in one memset instead of N SIGILLs.
     {
-      std::memset(mem.GetRAM() + masked, 0, 32);
-      zeroed = true;
-    }
-    else if (exram_size_v > 0 && (masked >> 28) == 0x1 &&
-             (masked & 0x0FFFFFFF) + 32 <= exram_size_v)
-    {
-      std::memset(mem.GetEXRAM() + (masked & 0x0FFFFFFF), 0, 32);
-      zeroed = true;
-    }
-    if (!zeroed)
-    {
-      static constexpr const char dcbz_oob[] = "NCE: dcbz EA out of bounds\n";
-      ::write(STDERR_FILENO, dcbz_oob, sizeof(dcbz_oob) - 1);
+      u32 next1 = 0, next2 = 0;
+      std::memcpy(&next1, reinterpret_cast<const void*>(static_cast<u64>(pc_val) + 4),
+                  sizeof(next1));
+      std::memcpy(&next2, reinterpret_cast<const void*>(static_cast<u64>(pc_val) + 8),
+                  sizeof(next2));
+
+      const u32 n1_opcd = (next1 >> 26) & 0x3F;
+      const u32 n1_rd = (next1 >> 21) & 0x1F;
+      const u32 n1_ra = (next1 >> 16) & 0x1F;
+      const s16 n1_simm = static_cast<s16>(next1 & 0xFFFF);
+
+      const u32 n2_opcd = (next2 >> 26) & 0x3F;
+      const u32 n2_bo = (next2 >> 21) & 0x1F;
+
+      // addi rN, rN, 32 (opcode 14, RA=RD, SIMM=32)
+      // followed by bc (opcode 16) with BO indicating bdnz/bdnz+/bdnz-
+      if (n1_opcd == 14 && n1_rd != 0 && n1_rd == n1_ra && n1_simm == 32 &&
+          n2_opcd == 16 && (n2_bo == 16 || n2_bo == 17 || n2_bo == 18))
+      {
+        // Verify the branch target points back to the dcbz instruction
+        const u32 n2_bd = (next2 >> 16) & 0x3FFF;
+        const s16 disp = static_cast<s16>(static_cast<u16>(n2_bd << 2));
+        const u32 btarget = static_cast<u32>(pc_val) + 8 + static_cast<u32>(disp);
+
+        // Canonical loop: dcbz uses ra=0 and rb=rN (the loop pointer)
+        if (btarget == static_cast<u32>(pc_val) && rb == n1_rd && ra == 0)
+        {
+          const u32 ctr_val = static_cast<u32>(ctx->uc_mcontext.regs->ctr & 0xFFFFFFFF);
+          const u32 total_bytes = ctr_val * 32;
+
+          // Only optimize when at least 10 iterations remain (avoid overhead
+          // for tiny loops where per-dcbz handling is already fast enough).
+          if (total_bytes >= 320 && total_bytes <= 32 * 1024 * 1024)
+          {
+            const bool loop_zeroed = [&]() -> bool
+            {
+              if (masked + total_bytes <= ram_size_v)
+              {
+                std::memset(mem.GetRAM() + masked, 0, total_bytes);
+                return true;
+              }
+              if (exram_size_v > 0 && (masked >> 28) == 0x1 &&
+                  (masked & 0x0FFFFFFF) + total_bytes <= exram_size_v)
+              {
+                std::memset(mem.GetEXRAM() + (masked & 0x0FFFFFFF), 0, total_bytes);
+                return true;
+              }
+              return false;
+            }();
+
+            if (loop_zeroed)
+            {
+              // Update loop register to final value (EA + total_bytes)
+              const u32 rn_val = static_cast<u32>(ctx->uc_mcontext.regs->gpr[n1_rd] & 0xFFFFFFFF);
+              ctx->uc_mcontext.regs->gpr[n1_rd] = static_cast<u64>(rn_val + total_bytes);
+
+              // Set CTR to 0 (loop completed)
+              ctx->uc_mcontext.regs->ctr = 0;
+
+              // Advance nip past the loop (past the bdnz+ at pc_val+8)
+              ctx->uc_mcontext.regs->nip = static_cast<u64>(static_cast<u32>(pc_val) + 12);
+
+              return;  // loop fully emulated, continue native execution
+            }
+          }
+        }
+      }
     }
 
-    ctx->uc_mcontext.regs->nip = u64(pc_val) + 4;
-    return;  // continue native execution
+    // === Fallthrough: single dcbz ===
+    {
+      bool zeroed = false;
+      if (masked + 32 <= ram_size_v)
+      {
+        std::memset(mem.GetRAM() + masked, 0, 32);
+        zeroed = true;
+      }
+      else if (exram_size_v > 0 && (masked >> 28) == 0x1 &&
+               (masked & 0x0FFFFFFF) + 32 <= exram_size_v)
+      {
+        std::memset(mem.GetEXRAM() + (masked & 0x0FFFFFFF), 0, 32);
+        zeroed = true;
+      }
+      if (!zeroed)
+      {
+        static constexpr const char dcbz_oob[] = "NCE: dcbz EA out of bounds\n";
+        ::write(STDERR_FILENO, dcbz_oob, sizeof(dcbz_oob) - 1);
+      }
+
+      ctx->uc_mcontext.regs->nip = u64(pc_val) + 4;
+      return;  // continue native execution
+    }
   }
 
   // === Check for patched P0 (trap-and-emulate) ===
