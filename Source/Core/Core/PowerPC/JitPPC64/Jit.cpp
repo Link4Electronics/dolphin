@@ -192,17 +192,21 @@ void JitPPC64::EmitProlog()
   {
     u32 hi = static_cast<u32>(addr >> 32);
     u32 lo = static_cast<u32>(addr & 0xFFFFFFFF);
+    // Load upper 32 bits (hi) into lower 32 of r12 using ADDIS (sign-extends but
+    // RLDICR below will clear the upper 64-bit half, so it's harmless).
     m_asm.ADDIS(REG_PPC_BASE, 0, static_cast<s32>(hi >> 16));
     m_asm.ORI(REG_PPC_BASE, REG_PPC_BASE, hi & 0xFFFF);
+    // Shift hi to the upper 32 bits; lower 32 are now zero.
     m_asm.RLDICR(REG_PPC_BASE, REG_PPC_BASE, 32, 31);
-    if (lo >> 16)
-      m_asm.ADDIS(REG_PPC_BASE, REG_PPC_BASE, static_cast<s32>(lo >> 16));
-    m_asm.ADDI(REG_PPC_BASE, REG_PPC_BASE, static_cast<s32>(lo & 0xFFFF));
+    // Add lo using ORIS/ORI — never sign-extends, so works even when
+    // lo>>16 or lo&0xFFFF has bit 15 set (which ADDI/ADDIS would sign-extend).
+    m_asm.ORIS(REG_PPC_BASE, REG_PPC_BASE, static_cast<u32>(lo >> 16));
+    m_asm.ORI(REG_PPC_BASE, REG_PPC_BASE, lo & 0xFFFF);
   }
   else
   {
-    m_asm.ADDIS(REG_PPC_BASE, 0, static_cast<s32>(static_cast<u32>(addr) >> 16));
-    m_asm.ADDI(REG_PPC_BASE, REG_PPC_BASE, static_cast<s32>(addr & 0xFFFF));
+    m_asm.ORIS(REG_PPC_BASE, 0, static_cast<u32>(addr >> 16));
+    m_asm.ORI(REG_PPC_BASE, REG_PPC_BASE, static_cast<u32>(addr & 0xFFFF));
   }
 
   gpr.Reset();
@@ -278,8 +282,8 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
       continue;
     if (!CanCompileInstruction(m_code_buffer[i].inst))
     {
-      NOTICE_LOG_FMT(POWERPC, "JITPPC64: can't compile block at {:08x} (instr {:08x} at +{})",
-                     em_address, m_code_buffer[i].inst.hex, i);
+      NOTICE_LOG_FMT(POWERPC, "JITPPC64: can't compile block at {:08x} (instr {:08x} opcd={} at +{})",
+                     em_address, m_code_buffer[i].inst.hex, m_code_buffer[i].inst.OPCD, i);
       return;
     }
   }
@@ -331,6 +335,9 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
 
   m_block_cache.FinalizeBlock(*b, jo.enableBlocklink, code_block, m_code_buffer);
   m_code_pos = block_end;
+
+  fprintf(stderr, "JITPROBE: compiled block at 0x%08X, %u instrs, size=%zu bytes, next=0x%08X\n",
+          em_address, code_block.m_num_instructions, m_asm.Size(), nextPC);
 }
 
 // ===========================================================================
@@ -342,6 +349,7 @@ void JitPPC64::Run()
   auto& core_timing = m_system.GetCoreTiming();
   auto& cpu = m_system.GetCPU();
   auto& interpreter = m_system.GetInterpreter();
+  u64 probe_count = 0;
 
   while (cpu.GetState() == CPU::State::Running)
   {
@@ -359,13 +367,24 @@ void JitPPC64::Run()
       if (block)
       {
         auto func = reinterpret_cast<void (*)()>(block->normalEntry);
+        u32 pc_before = m_ppc_state.pc;
         func();
+        u32 pc_after = m_ppc_state.pc;
         m_ppc_state.downcount -= static_cast<int>(block->originalSize);
+        if (++probe_count % 1000 == 1)
+          fprintf(stderr, "JITPROBE: pc 0x%08X -> 0x%08X (blocks=%llu, dc=%d)\n",
+                  pc_before, pc_after,
+                  (unsigned long long)probe_count, m_ppc_state.downcount);
       }
       else
       {
+        u32 pc_before = m_ppc_state.pc;
         interpreter.SingleStep();
         m_ppc_state.downcount -= 1;
+        if (++probe_count % 1000 == 1)
+          fprintf(stderr, "JITPROBE: INTERP pc 0x%08X -> 0x%08X (blocks=%llu, dc=%d)\n",
+                  pc_before, m_ppc_state.pc,
+                  (unsigned long long)probe_count, m_ppc_state.downcount);
       }
     }
   }

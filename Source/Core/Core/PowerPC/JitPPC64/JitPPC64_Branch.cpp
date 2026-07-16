@@ -7,8 +7,8 @@
 
 bool JitPPC64::CompileB(UGeckoInstruction inst)
 {
-  s32 li = static_cast<s32>(inst.LI << 6) >> 6;
-  u32 target = js.compilerPC + li;
+  s32 li = static_cast<s32>(inst.LI << 8) >> 6;
+  u32 target = inst.AA ? static_cast<u32>(li) : js.compilerPC + li;
 
   if (inst.LK)
   {
