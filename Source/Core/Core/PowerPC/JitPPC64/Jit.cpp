@@ -618,18 +618,19 @@ void JitPPC64::PatchAllDCBZ()
     std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), &illegal, sizeof(illegal));
   }
 
-  // Clear icache for patched regions.  The patched addresses span the full
-  // RAM/EXRAM ranges, so clear the entire K1/K2 ranges once.
+  // Clear icache — only the code region (2 MB), not the full 24 MB.
+  // Called on EVERY inner-loop iteration (patch + unpatch), so the range
+  // must be small to avoid significant overhead.
   auto& memory = m_system.GetMemory();
-  const u32 ram_size_val = memory.GetRamSizeReal();
-  if (ram_size_val > 0)
+  constexpr u32 DCBZ_CACHE_LIMIT = 0x200000u;
+  const u32 ram_size = std::min(memory.GetRamSizeReal(), DCBZ_CACHE_LIMIT);
+  if (ram_size > 0)
   {
     __builtin___clear_cache(reinterpret_cast<char*>(0x80000000ULL),
-                            reinterpret_cast<char*>(0x80000000ULL + ram_size_val));
+                            reinterpret_cast<char*>(0x80000000ULL + ram_size));
     __builtin___clear_cache(reinterpret_cast<char*>(0x70000000ULL),
-                            reinterpret_cast<char*>(0x70000000ULL + ram_size_val));
+                            reinterpret_cast<char*>(0x70000000ULL + ram_size));
   }
-  // EXRAM is not in the NCE mapping and has no patched dcbz — skip icache clear.
 
   m_dcbz_patches_applied = true;
 }
@@ -649,17 +650,16 @@ void JitPPC64::UnpatchAllDCBZ()
     std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), &orig, sizeof(orig));
   }
 
-  // Clear icache for patched regions (same ranges as PatchAllDCBZ).
-  auto& memory = m_system.GetMemory();
-  const u32 ram_size_val = memory.GetRamSizeReal();
-  if (ram_size_val > 0)
+  // Same limited icache clear as PatchAllDCBZ.
+  constexpr u32 DCBZ_CACHE_LIMIT = 0x200000u;
+  const u32 ram_size = std::min(m_system.GetMemory().GetRamSizeReal(), DCBZ_CACHE_LIMIT);
+  if (ram_size > 0)
   {
     __builtin___clear_cache(reinterpret_cast<char*>(0x80000000ULL),
-                            reinterpret_cast<char*>(0x80000000ULL + ram_size_val));
+                            reinterpret_cast<char*>(0x80000000ULL + ram_size));
     __builtin___clear_cache(reinterpret_cast<char*>(0x70000000ULL),
-                            reinterpret_cast<char*>(0x70000000ULL + ram_size_val));
+                            reinterpret_cast<char*>(0x70000000ULL + ram_size));
   }
-  // EXRAM is not in the NCE mapping and has no patched dcbz — skip icache clear.
 
   m_dcbz_patches_applied = false;
 }
@@ -2895,9 +2895,9 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
     }
     ctx->uc_mcontext.regs->nip = u64(m_ppc_state.pc);
 
-    // Return to guest code (sigreturn restores the ucontext with host
-    // registers in place, so the guest continues at the updated PC).
-    RestoreHostRegsInContext(uctx);
+    // Continue native execution — the ucontext now has the corrected
+    // GPRs, CR, LR, CTR, XER, and PC from the inline handler above.
+    // sigreturn resumes guest code natively at the next instruction.
     return;
   }
 
@@ -3254,6 +3254,12 @@ void JitPPC64::EmulateMTSpr(u32 spr, u32 val)
         else
           m_guest.dbatl[idx] = val;
       }
+      // Rebuild MMU translation tables — without this, m_dbat_table /
+      // m_ibat_table contain stale entries and subsequent memory accesses
+      // use wrong physical addresses.
+      m_mmu.IBATUpdated();
+      m_mmu.DBATUpdated();
+      break;
     }
     else if (spr >= 560 && spr <= 575)
     {
