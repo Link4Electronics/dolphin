@@ -32,6 +32,7 @@ public:
   void ADDIC_(u32 rd, u32 ra, s32 sim) { Write32(D(13, rd, ra, sim)); }
   void ADDIS(u32 rd, u32 ra, s32 sim) { Write32(D(15, rd, ra, sim)); }
   void ADDI(u32 rd, u32 ra, s32 sim) { Write32(D(14, rd, ra, sim)); }
+  void LI(u32 rd, s32 sim) { ADDI(rd, 0, sim); }
   void SUBF(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 40, rc)); }
   void SUBFC(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 8, rc)); }
   void SUBFE(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 136, rc)); }
@@ -88,12 +89,17 @@ public:
     Write32((20u << 26) | (rs << 21) | (ra << 16) | (sh << 11) | (mb << 6) | (me << 1) | (rc ? 1 : 0));
   }
 
-  // -- Compare (opcd=31) --
-  void CMPW(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (ra << 16) | (rb << 11) | (0 << 1)); }
-  void CMPLW(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (ra << 16) | (rb << 11) | (32 << 1)); }
-  void CMPWI(u32 crf, u32 ra, s32 sim) { Write32((11u << 26) | (crf << 23) | (ra << 16) | (sim & 0xFFFF)); }
-  void CMPLWI(u32 crf, u32 ra, u32 ui) { Write32((10u << 26) | (crf << 23) | (ra << 16) | (ui & 0xFFFF)); }
-  void CMPDI(u32 crf, u32 ra, s32 sim) { Write32((11u << 26) | (crf << 23) | (1u << 22) | (ra << 16) | (sim & 0xFFFF)); }
+  // -- Compare (opcd=31 X-form with crfD at bits 25:23, L at bit 22) --
+  // RA is at PPC bits 10:14 = u32 bits 21:17, RB at PPC 15:19 = u32 16:12
+  // This DIFFERS from standard X-form where RA is at u32 20:16, RB at 15:11
+  void CMPW(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (ra << 17) | (rb << 12) | (0 << 1)); }
+  void CMPLW(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (ra << 17) | (rb << 12) | (32 << 1)); }
+  // CMPI/CMPLI (opcd 10/11) use similar crfD-variant: RA at u32 21:17, SIMM at u32 16:1
+  void CMPWI(u32 crf, u32 ra, s32 sim) { Write32((11u << 26) | (crf << 23) | (0u << 22) | (ra << 17) | ((sim & 0xFFFF) << 1)); }
+  void CMPLWI(u32 crf, u32 ra, u32 ui) { Write32((10u << 26) | (crf << 23) | (0u << 22) | (ra << 17) | ((ui & 0xFFFF) << 1)); }
+  // CMPDI/CMPLDI (L=1 for 64-bit doubleword compare): same RA/SIMM layout with L=1
+  void CMPDI(u32 crf, u32 ra, s32 sim) { Write32((11u << 26) | (crf << 23) | (1u << 22) | (ra << 17) | ((sim & 0xFFFF) << 1)); }
+  void CMPLDI(u32 crf, u32 ra, u32 ui) { Write32((10u << 26) | (crf << 23) | (1u << 22) | (ra << 17) | ((ui & 0xFFFF) << 1)); }
 
   // -- Load/Store (D-form) --
   void LWZ(u32 rt, u32 ra, s32 d) { Write32(D(32, rt, ra, d)); }
@@ -136,12 +142,28 @@ public:
 
   // -- Branch (I-form / B-form) --
   // I-form: |18|LI(24b)|AA|LK| — LI at PPC 6-29=u32 25-2, AA/LK at PPC 30-31=u32 1-0
+  // B — relative branch (AA=0) with 24-bit displacement
+  // target_u32 is the absolute address; we encode it as AA=1 (within 256MB).
   void B(u32 target, bool aa = false, bool lk = false)
   {
     Write32((18u << 26) | (((target >> 2) & 0x00FFFFFF) << 2) | (aa ? 1u << 1 : 0u) | (lk ? 1u : 0u));
   }
   void BL(u32 target, bool aa = false) { B(target, aa, true); }
   void BA(u32 target) { B(target, true, false); }
+
+  // Branch relative to a pointer (within ±32MB from current position)
+  void BRel(const u8* target)
+  {
+    ptrdiff_t d = target - (m_code + m_pos);
+    u32 li = (static_cast<u32>(d >> 2)) & 0x00FFFFFF;
+    Write32((18u << 26) | li);
+  }
+  void BLRel(const u8* target)
+  {
+    ptrdiff_t d = target - (m_code + m_pos);
+    u32 li = (static_cast<u32>(d >> 2)) & 0x00FFFFFF;
+    Write32((18u << 26) | li | 1u);
+  }
 
   // bc BO, BI, BD [, AA, LK]
   // B-form: |16|BO|BI|BD(14b)|AA|LK| — BD at PPC 16-29=u32 15-2, AA/LK at PPC 30-31=u32 1-0
@@ -163,10 +185,11 @@ public:
     Write32((19u << 26) | ((bo & 0x1F) << 21) | ((bi & 0x1F) << 16) | (528u << 1) | (lk ? 1 : 0));
   }
 
-  // -- Condition register (XL-form, opcd=19) --
+  // -- Condition register (crfD-variant, opcd=19) --
+  // |19|crfD|crfS|0000|00000|0000000000|0| — crfS at PPC 9:11 = u32 22:20
   void MCRF(u32 crfd, u32 crfs)
   {
-    Write32((19u << 26) | (crfd << 23) | (crfs << 18) | (0u << 1));
+    Write32((19u << 26) | (crfd << 23) | (crfs << 20) | (0u << 1));
   }
   void CRAND(u32 bt, u32 ba, u32 bb) { Write32(XL(19, bt, ba, bb, 257)); }
   void CRNAND(u32 bt, u32 ba, u32 bb) { Write32(XL(19, bt, ba, bb, 225)); }
@@ -243,27 +266,52 @@ public:
   void STDUX(u32 rs, u32 ra, u32 rb) { Write32(X(31, rs, ra, rb, 181, false)); }
 
   // rldicr RA, RS, SH, ME — rotate left double immediate and clear right
-  // MD-form: |30|RS|RA|sh[4:0]|me[4:0]|0|sh[5]|me[5]|01|Rc|
-  // u32:     |31:26|25:21|20:16|15:11|10:6|5|4|3|2:1|0|
+  // Kernel encoding (PPC_RAW_RLDICR):
+  //   base=0x78000004 | sh[4:0]@bits15:11 | sh[5]@bit1 | me[4:0]@bits10:6 | me[5]@bit5
+  // u32: |31:26|25:21|20:16|15:11|10:6|5|4|3|2|1|0|
   void RLDICR(u32 ra, u32 rs, u32 sh, u32 me, bool rc = false)
   {
-    Write32((30u << 26) | (rs << 21) | (ra << 16) | ((sh & 0x1F) << 11) | ((me & 0x1F) << 6) |
-            ((sh >> 5) << 4) | ((me >> 5) << 3) | (1u << 1) | (rc ? 1u : 0u));
+    Write32(0x78000004u | (rs << 21) | (ra << 16) | ((sh & 0x1F) << 11) |
+            ((me & 0x1F) << 6) | ((sh & 0x20) >> 4) | (me & 0x20) | (rc ? 1u : 0u));
   }
 
   // rldicl RA, RS, SH, MB — clear upper bits (e.g., rldicl rd, rs, 0, 32 = zero-extend 32-bit)
-  // MD-form: |30|RS|RA|sh[4:0]|mb[4:0]|0|sh[5]|mb[5]|00|Rc|
+  // Kernel encoding (PPC_RAW_RLDICL):
+  //   base=0x78000000 | sh[4:0]@bits15:11 | sh[5]@bit1 | mb[4:0]@bits10:6 | mb[5]@bit5
   void RLDICL(u32 ra, u32 rs, u32 sh, u32 mb, bool rc = false)
   {
-    Write32((30u << 26) | (rs << 21) | (ra << 16) | ((sh & 0x1F) << 11) | ((mb & 0x1F) << 6) |
-            ((sh >> 5) << 4) | ((mb >> 5) << 3) | (rc ? 1u : 0u));
+    Write32(0x78000000u | (rs << 21) | (ra << 16) | ((sh & 0x1F) << 11) |
+            ((mb & 0x1F) << 6) | ((sh & 0x20) >> 4) | (mb & 0x20) | (rc ? 1u : 0u));
   }
 
   // Zero-extend 32-bit: rldicl rd, rs, 0, 32  (clear upper 32 bits)
   void CLRLDI(u32 ra, u32 rs, u32 mb) { RLDICL(ra, rs, 0, mb); }
   void CLR32(u32 rd, u32 rs) { RLDICL(rd, rs, 0, 32); }
 
-  // AltiVec (opcd=4)
+  // -- Branch / SPR moves --
+  void MTCTR(u32 rs) { Write32(X(31, 0, 0, rs, 467, false)); }
+  void MFCTR(u32 rd) { Write32(X(31, rd, 0, 0, 339, false)); }
+  void BCTRL() { Write32((19u << 26) | (528u << 1) | 1u); }
+  void BCTR()  { Write32((19u << 26) | (528u << 1)); }
+
+  // -- Move Register (OR rS, rS, rT → rA = rS) --
+  void MR(u32 ra, u32 rs) { OR(ra, rs, rs); }
+
+  // Load 64-bit immediate into rd (6 instructions, no sign-extension issues).
+  // Uses existing assembler methods: lis + clrldi + ori + sldi + oris + ori
+  void MOVI64(u32 rd, u64 imm)
+  {
+    const auto hi = static_cast<s32>((imm >> 48) & 0xFFFF);
+    const auto h3 = static_cast<u32>((imm >> 32) & 0xFFFF);
+    const auto h2 = static_cast<u32>((imm >> 16) & 0xFFFF);
+    const auto lo = static_cast<u32>(imm & 0xFFFF);
+    ADDIS(rd, 0, hi);
+    RLDICL(rd, rd, 0, 32);
+    ORI(rd, rd, h3);
+    RLDICR(rd, rd, 32, 31);
+    ORIS(rd, rd, h2);
+    ORI(rd, rd, lo);
+  }
   void VADDFP(u32 vd, u32 va, u32 vb) { Write32(AV_VA(4, vd, va, vb, 26)); }
   void VSUBFP(u32 vd, u32 va, u32 vb) { Write32(AV_VA(4, vd, va, vb, 28)); }
   void VMULFP(u32 vd, u32 va, u32 vb) { Write32(AV_VA(4, vd, va, vb, 52)); }

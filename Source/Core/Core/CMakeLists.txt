@@ -668,13 +668,9 @@ elseif(_M_ARM_64)
     PowerPC/JitArmCommon/BackPatch.h
   )
 elseif(_M_PPC_64)
-  enable_language(ASM)
   target_sources(core PRIVATE
     PowerPC/JitPPC64/Jit.cpp
     PowerPC/JitPPC64/Jit.h
-    PowerPC/JitPPC64/JitAsm.cpp
-    PowerPC/JitPPC64/JitAsm.h
-    PowerPC/JitPPC64/JitAsm.S
     PowerPC/JitPPC64/JitPPC64_BackPatch.cpp
     PowerPC/JitPPC64/JitPPC64_Branch.cpp
     PowerPC/JitPPC64/JitPPC64_FPU.cpp

@@ -22,6 +22,11 @@
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 
+// TrampolineDispatcher — defined in JitPPC64_BackPatch.cpp
+extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
+                                     u32 is_store, u32 access_size,
+                                     u32 rd, u32 ra, u64 store_value);
+
 // PPCState field offsets (computed at init from actual struct layout)
 u32 PC_OFFSET = 0;
 u32 GPR_OFFSET = 0;
@@ -34,8 +39,11 @@ u32 MSR_OFFSET = 0;
 u32 PS_OFFSET = 0;
 
 // Signal handler for MMIO backpatching
-static JitPPC64* s_jit_instance = nullptr;
+JitPPC64* g_jit_ppc64_instance = nullptr;
 static struct sigaction s_old_sigsegv;
+
+// ppcState address stored in a global so enter_code can load r12 before first dispatch
+static u64 s_ppc_state_addr = 0;
 
 static void InitOffsets(const PowerPC::PowerPCState& state)
 {
@@ -51,8 +59,11 @@ static void InitOffsets(const PowerPC::PowerPCState& state)
   PS_OFFSET = static_cast<u32>(reinterpret_cast<const char*>(&state.ps) - base);
 }
 
-// JIT code memory: 32 MB of RWX
+// Combined JIT code memory layout:
+// [-- 32 MB main JIT code --][-- 4 MB trampoline area --]
 static constexpr u32 JIT_CODE_SIZE = 32 * 1024 * 1024;
+static constexpr u32 TRAMP_CODE_SIZE = 4 * 1024 * 1024;
+static constexpr u32 COMBINED_SIZE = JIT_CODE_SIZE + TRAMP_CODE_SIZE;
 
 static u8* AllocateCodeRegion(size_t size)
 {
@@ -70,6 +81,22 @@ static void FreeCodeRegion(u8* ptr, size_t size)
 {
   if (ptr)
     munmap(ptr, size);
+}
+
+// Emit a 64-bit immediate load into the trampoline assembler.
+// Uses existing assembler methods to avoid manual encoding bugs.
+static void TrampMOVI64(PPC64Assembler& asm_, u32 rd, u64 imm)
+{
+  const auto h4 = static_cast<s32>((imm >> 48) & 0xFFFF);
+  const auto h3 = static_cast<u32>((imm >> 32) & 0xFFFF);
+  const auto h2 = static_cast<u32>((imm >> 16) & 0xFFFF);
+  const auto lo = static_cast<u32>(imm & 0xFFFF);
+  asm_.ADDIS(rd, 0, h4);
+  asm_.RLDICL(rd, rd, 0, 32);          // clrldi rd, rd, 32
+  asm_.ORI(rd, rd, h3);
+  asm_.RLDICR(rd, rd, 32, 31);          // sldi rd, rd, 32
+  asm_.ORIS(rd, rd, h2);
+  asm_.ORI(rd, rd, lo);
 }
 
 // Stack frame for compiled blocks (ELFv2 PPC64 ABI)
@@ -144,7 +171,7 @@ static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
 
   uintptr_t access_addr = reinterpret_cast<uintptr_t>(info->si_addr);
 
-  if (s_jit_instance && s_jit_instance->HandleFault(access_addr, ctx))
+  if (g_jit_ppc64_instance && g_jit_ppc64_instance->HandleFault(access_addr, ctx))
     return;
 
   // Not a JIT MMIO fault — restore default handler and re-raise so the
@@ -155,21 +182,25 @@ static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
   raise(SIGSEGV);
 }
 
-static void DebugCrashHandler(int sig, siginfo_t* info, void* ctx)
-{
-  fprintf(stderr, "JITPROBE: CRASH signal=%d addr=%p\n", sig, info->si_addr);
-  _exit(1);
-}
-
 void JitPPC64::Init()
 {
   RefreshConfig();
   InitOffsets(m_ppc_state);
 
-  m_code_region = AllocateCodeRegion(JIT_CODE_SIZE);
+  // Allocate combined region
+  m_code_region = AllocateCodeRegion(COMBINED_SIZE);
+  if (!m_code_region)
+    return;
+
   m_code_pos = m_code_region;
   m_code_end = m_code_region + JIT_CODE_SIZE;
   m_asm.SetBase(m_code_pos, JIT_CODE_SIZE);
+
+  // Trampoline region starts right after main code
+  m_tramp_region = m_code_region + JIT_CODE_SIZE;
+  m_tramp_pos = m_tramp_region;
+  m_tramp_end = m_tramp_region + TRAMP_CODE_SIZE;
+  m_tramp_asm.SetBase(m_tramp_pos, TRAMP_CODE_SIZE);
 
   gpr.SetJit(*this, m_asm, REG_PPC_BASE);
 
@@ -180,14 +211,15 @@ void JitPPC64::Init()
   jo.fastmem_arena = false;
   jo.optimizeGatherPipe = false;
 
+  s_ppc_state_addr = reinterpret_cast<u64>(&m_ppc_state);
   InitBackpatch();
   CompileDispatcher();
 
-  NOTICE_LOG_FMT(POWERPC, "JITPPC64: initialized (code={}, size={})",
-                 fmt::ptr(m_code_region), JIT_CODE_SIZE);
+  NOTICE_LOG_FMT(POWERPC, "JITPPC64: initialized (code={}, tramp={}, combined={})",
+                 fmt::ptr(m_code_region), fmt::ptr(m_tramp_region), COMBINED_SIZE);
 
   // Install SIGSEGV handler for MMIO backpatching
-  s_jit_instance = this;
+  g_jit_ppc64_instance = this;
   struct sigaction sa = {};
   sa.sa_sigaction = SIGSEGVHandler;
   sa.sa_flags = SA_SIGINFO;
@@ -199,14 +231,19 @@ void JitPPC64::Shutdown()
 {
   // Restore old SIGSEGV handler
   sigaction(SIGSEGV, &s_old_sigsegv, nullptr);
-  s_jit_instance = nullptr;
+  g_jit_ppc64_instance = nullptr;
 
   ShutdownBackpatch();
   m_block_cache.Shutdown();
-  FreeCodeRegion(m_code_region, JIT_CODE_SIZE);
+  m_fault_to_handler.clear();
+  FreeCodeRegion(m_code_region, COMBINED_SIZE);
   m_code_region = nullptr;
   m_code_pos = nullptr;
   m_code_end = nullptr;
+  m_tramp_region = nullptr;
+  m_tramp_pos = nullptr;
+  m_tramp_end = nullptr;
+  m_enter_code = nullptr;
   m_dispatcher_entry = nullptr;
 }
 
@@ -216,6 +253,11 @@ void JitPPC64::ClearCache()
   m_code_pos = m_code_region;
   m_code_end = m_code_region + JIT_CODE_SIZE;
   m_asm.SetBase(m_code_pos, JIT_CODE_SIZE);
+  m_tramp_pos = m_tramp_region;
+  m_tramp_end = m_tramp_region + TRAMP_CODE_SIZE;
+  m_tramp_asm.SetBase(m_tramp_pos, TRAMP_CODE_SIZE);
+  m_fault_to_handler.clear();
+  m_enter_code = nullptr;
   m_dispatcher_entry = nullptr;
   CompileDispatcher();
 }
@@ -223,9 +265,75 @@ void JitPPC64::ClearCache()
 void JitPPC64::CompileDispatcher()
 {
   m_asm.SetBase(m_code_pos, static_cast<size_t>(m_code_end - m_code_pos));
-  m_dispatcher_entry = m_code_pos;
+
+  // ── enter_code (called from Run()) ────────────────────────────────────
+  // Sets r12 = &ppcState, then falls through to the dispatcher.
+  // On PPC64, r12 is REG_PPC_BASE — the base pointer for all ppcState
+  // loads/stores.  The block prolog also re-establishes it, but the
+  // dispatcher itself needs r12 to read pc/downcount from ppcState.
+  //
+  // Mirror of Jit64's JitAsm.cpp: MOV(64, R(RPPCSTATE), Imm64(&ppc_state)).
+
+  m_enter_code = m_code_pos;
+  TrampMOVI64(m_asm, 11, reinterpret_cast<u64>(&s_ppc_state_addr));
+  m_asm.LD(REG_PPC_BASE, 11, 0);     // r12 = *(s_ppc_state_addr)
+
+  // ── dispatcher entry (called from block epilogs) ──────────────────────
+  // Register state at entry:
+  //   r12      = &ppcState  (re-established by enter_code or previous block's prolog)
+  //   r14-r31  = host callee-saved regs (preserved by block epilog)
+  //   LR       = return address inside Run()
+  //   r1       = host stack
+  //
+  // We emit branches with placeholder offsets and patch them after we know
+  // all positions (the assembler has no label support).
+
+  m_dispatcher_entry = m_asm.Code() + m_asm.Size();
+  m_asm.MFLR(14);                              // save Run_LR in r14
+
+  m_asm.LWZ(11, REG_PPC_BASE, DOWNCOUNT_OFFSET);
+  m_asm.CMPWI(0, 11, 0);
+
+  // ble exit (branch if downcount ≤ 0) — placeholder
+  const u8* ble_pos = m_asm.Code() + m_asm.Size();
+  m_asm.BC(4, 1, 0);  // BO=4 (false), BI=1 (GT) → "branch if not GT" = ble
+
+  // r3 = ppcState.pc → call JitPPC64Dispatch(pc)
+  m_asm.LWZ(3, REG_PPC_BASE, PC_OFFSET);
+  TrampMOVI64(m_asm, 12, reinterpret_cast<u64>(&JitPPC64Dispatch));
+  m_asm.MTCTR(12);
+  m_asm.BCTRL();
+
+  // beq exit (branch if r3 == 0, i.e. block not found) — placeholder
+  m_asm.CMPLDI(0, 3, 0);
+  const u8* beq_pos = m_asm.Code() + m_asm.Size();
+  m_asm.BC(12, 2, 0);  // BO=12 (true), BI=2 (EQ) → beq
+
+  // ── Success path: jump to block entry ──────────────────────────────────
+  m_asm.MTLR(14);      // restore Run_LR (block prolog will re-save it)
+  m_asm.MTCTR(3);      // block → CTR
+  m_asm.BCTR();        // jump to block (LR preserved, prolog saves it)
+
+  // ── Exit path: return to Run() ────────────────────────────────────────
+  const u8* exit_pos = m_asm.Code() + m_asm.Size();
+  m_asm.MTLR(14);      // restore Run_LR
   m_asm.BLR();
-  m_code_pos = m_code_pos + m_asm.Size();
+
+  // ── Patch placeholder branch offsets ───────────────────────────────────
+  s32 ble_bd = static_cast<s32>(exit_pos - ble_pos);   // byte distance
+  s32 beq_bd = static_cast<s32>(exit_pos - beq_pos);
+
+  // BC encoding: |16(6)|BO(5)|BI(5)|BD(14b)|AA(1)|LK(1)|
+  // BD at u32 bits 15:2, in word-offset units (hardware multiplies by 4).
+  // The assembler stores (bd >> 2) & mask at bits 15:2.
+  u32 ble_enc = (16u << 26) | (4u << 21) | (1u << 16) |
+                (((ble_bd >> 2) & 0x3FFF) << 2);
+  u32 beq_enc = (16u << 26) | (12u << 21) | (2u << 16) |
+                (((beq_bd >> 2) & 0x3FFF) << 2);
+  std::memcpy(const_cast<u8*>(ble_pos), &ble_enc, sizeof(ble_enc));
+  std::memcpy(const_cast<u8*>(beq_pos), &beq_enc, sizeof(beq_enc));
+
+  m_code_pos = const_cast<u8*>(m_asm.Code() + m_asm.Size());
 }
 
 // ===========================================================================
@@ -312,6 +420,173 @@ void JitPPC64::EmitCR0Update()
   m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 30, 30);
   m_asm.RLWIMI(REG_SCRATCH2, REG_SCRATCH, 27, 3, 3);
   m_asm.MTCRF(0x80, REG_SCRATCH2);
+}
+
+// ===========================================================================
+// EmitBackpatchRoutine — emit fast path + trampoline slow path
+//
+// Called from CompileLoadStore after the EA is in REG_SCRATCH2 (r11) and
+// the data register is loaded/stored.  We emit:
+//   1. The fast path instruction (LWZ/STW/LBZ/etc.) in main code
+//   2. A corresponding slow path in the trampoline region that:
+//      - Saves volatile registers
+//      - Calls TrampolineDispatcher with (ppcState*, EA, instruction, next_jit)
+//      - For loads: stores the returned value to data_reg
+//      - Restores registers
+//      - Branches back to the instruction after the fast path
+//
+// On fault, the fast path is patched with `b slow_path_entry`.
+// ===========================================================================
+void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
+                                     u32 ra, u32 data_reg, bool is_load,
+                                     bool is_fpr)
+{
+  // 1. Record fast path position
+  const u8* fast_start = m_asm.Code() + m_asm.Size();
+
+  // Emit the fast path access instruction
+  if (is_fpr)
+  {
+    // FPU loads/stores go through FPR 0
+    if (is_load)
+    {
+      if (access_size == 32)
+        m_asm.LFS(0, REG_SCRATCH2, 0);
+      else
+        m_asm.LFD(0, REG_SCRATCH2, 0);
+    }
+    else
+    {
+      if (access_size == 32)
+        m_asm.STFS(0, REG_SCRATCH2, 0);
+      else
+        m_asm.STFD(0, REG_SCRATCH2, 0);
+    }
+  }
+  else
+  {
+    switch (access_size)
+    {
+    case 8:
+      if (is_load)  m_asm.LBZ(data_reg, REG_SCRATCH2, 0);
+      else          m_asm.STB(data_reg, REG_SCRATCH2, 0);
+      break;
+    case 16:
+      if (is_load)  m_asm.LHZ(data_reg, REG_SCRATCH2, 0);
+      else          m_asm.STH(data_reg, REG_SCRATCH2, 0);
+      break;
+    case 32:
+      if (is_load)  m_asm.LWZ(data_reg, REG_SCRATCH2, 0);
+      else          m_asm.STW(data_reg, REG_SCRATCH2, 0);
+      break;
+    default:
+      return;
+    }
+  }
+  const u8* fast_end = m_asm.Code() + m_asm.Size();
+
+  // 2. Emit slow path in trampoline region
+  const u8* slow_entry = m_tramp_pos;
+  m_tramp_asm.SetBase(m_tramp_pos, static_cast<size_t>(m_tramp_end - m_tramp_pos));
+
+  // Save volatile registers (r0, r3-r10) + LR
+  m_tramp_asm.MFLR(0);
+  m_tramp_asm.STDU(REG_SCRATCH, 1, -128);
+  m_tramp_asm.STD(0, 1, 120);   // save LR
+  m_tramp_asm.STD(3, 1, 112);
+  m_tramp_asm.STD(4, 1, 104);
+  m_tramp_asm.STD(5, 1, 96);
+  m_tramp_asm.STD(6, 1, 88);
+  m_tramp_asm.STD(7, 1, 80);
+  m_tramp_asm.STD(8, 1, 72);
+  m_tramp_asm.STD(9, 1, 64);
+  m_tramp_asm.STD(10, 1, 56);
+
+  // Arguments to TrampolineDispatcher:
+  //   r3 = ppcState* (from r12)
+  //   r4 = EA         (from r11)
+  //   r5 = is_store   (0=load, 1=store)
+  //   r6 = access_size (8/16/32)
+  //   r7 = PPC register rd
+  //   r8 = PPC register ra
+  m_tramp_asm.MR(3, REG_PPC_BASE);
+  m_tramp_asm.MR(4, REG_SCRATCH2);
+
+  m_tramp_asm.LI(5, is_load ? 0 : 1);
+  m_tramp_asm.LI(6, static_cast<s32>(access_size));
+  m_tramp_asm.LI(7, static_cast<s32>(rd));
+  m_tramp_asm.LI(8, static_cast<s32>(ra));
+
+  // For stores: pass the actual value in r9 (avoids reading stale ppcState)
+  if (!is_load)
+  {
+    if (is_fpr)
+    {
+      // FPU store: save f0 to stack and load into r9 as u64
+      m_tramp_asm.STFD(0, 1, -8);
+      m_tramp_asm.LD(9, 1, -8);
+    }
+    else
+    {
+      m_tramp_asm.MR(9, data_reg);
+    }
+  }
+
+  // Call TrampolineDispatcher via absolute address
+  TrampMOVI64(m_tramp_asm, 12,
+              reinterpret_cast<u64>(&TrampolineDispatcher));
+  m_tramp_asm.MTCTR(12);
+  m_tramp_asm.BCTRL();
+
+  // For loads: return value in r3
+  if (is_load)
+  {
+    if (is_fpr)
+    {
+      // FPU load: dispatcher wrote to state->ps[rd]; load f0 from ppcState
+      // so the STFD after the fast path stores the correct value
+      m_tramp_asm.LFD(0, REG_PPC_BASE,
+                       static_cast<s32>(PS_OFFSET + rd * 16));
+    }
+    else
+    {
+      // Integer load: copy result to data_reg (r3 has the value)
+      m_tramp_asm.MR(data_reg, 3);
+    }
+  }
+
+  // Restore registers
+  m_tramp_asm.LD(10, 1, 56);
+  m_tramp_asm.LD(9, 1, 64);
+  m_tramp_asm.LD(8, 1, 72);
+  m_tramp_asm.LD(7, 1, 80);
+  m_tramp_asm.LD(6, 1, 88);
+  m_tramp_asm.LD(5, 1, 96);
+  m_tramp_asm.LD(4, 1, 104);
+  m_tramp_asm.LD(3, 1, 112);
+  m_tramp_asm.LD(0, 1, 120);
+  m_tramp_asm.MTLR(0);
+  m_tramp_asm.ADDI(REG_SCRATCH, 1, 128);
+  m_tramp_asm.MR(1, REG_SCRATCH);
+
+  // Branch back to the instruction after the fast path
+  m_tramp_asm.BRel(fast_end);
+
+  // 3. Record the mapping
+  u32 tramp_size = static_cast<u32>(m_tramp_asm.Size());
+  m_tramp_pos += tramp_size;
+
+  FastmemArea area;
+  area.fast_access_code = fast_start;
+  area.slow_access_code = slow_entry;
+  area.is_load = is_load;
+  area.rd = rd;
+  area.ra = ra;
+  m_fault_to_handler[fast_end] = area;
+
+  // Flush trampoline icache
+  __builtin___clear_cache(const_cast<u8*>(slow_entry),
+                           const_cast<u8*>(slow_entry + tramp_size));
 }
 
 // ===========================================================================
@@ -416,72 +691,36 @@ void JitPPC64::Run()
 {
   auto& core_timing = m_system.GetCoreTiming();
   auto& cpu = m_system.GetCPU();
-  auto& interpreter = m_system.GetInterpreter();
-  u64 probe_count = 0;
-
-  fprintf(stderr, "JITPROBE: Run() entered, pc=0x%08X dc=%d state=%d\n",
-          m_ppc_state.pc, m_ppc_state.downcount, static_cast<int>(cpu.GetState()));
-
-  // DEBUG: catch crashes in compiled code
-  struct sigaction crash_sa;
-  std::memset(&crash_sa, 0, sizeof(crash_sa));
-  crash_sa.sa_sigaction = DebugCrashHandler;
-  crash_sa.sa_flags = SA_SIGINFO | SA_NODEFER;
-  sigemptyset(&crash_sa.sa_mask);
-  sigaction(SIGSEGV, &crash_sa, nullptr);
-  sigaction(SIGILL, &crash_sa, nullptr);
-  sigaction(SIGFPE, &crash_sa, nullptr);
-  sigaction(SIGTRAP, &crash_sa, nullptr);
 
   while (cpu.GetState() == CPU::State::Running)
   {
     core_timing.Advance();
 
-    fprintf(stderr, "JITPROBE: outer iter, pc=0x%08X dc=%d\n",
-            m_ppc_state.pc, m_ppc_state.downcount);
-
     while (m_ppc_state.downcount > 0 && cpu.GetState() == CPU::State::Running)
     {
-      fprintf(stderr, "JITPROBE: inner top, pc=0x%08X dc=%d\n",
-              m_ppc_state.pc, m_ppc_state.downcount);
-    {
-      JitBlock* block = m_block_cache.GetBlockFromStartAddress(m_ppc_state.pc, m_ppc_state.feature_flags);
-      if (!block)
+      // Try to find or compile a block for the current PC
+      if (!m_block_cache.GetBlockFromStartAddress(m_ppc_state.pc,
+                                                    m_ppc_state.feature_flags))
       {
-        fprintf(stderr, "JITPROBE: compile block at 0x%08X, CTR=0x%08X\n",
-                m_ppc_state.pc, m_ppc_state.spr[9]);
         Jit(m_ppc_state.pc);
-        block = m_block_cache.GetBlockFromStartAddress(m_ppc_state.pc, m_ppc_state.feature_flags);
+        if (!m_block_cache.GetBlockFromStartAddress(m_ppc_state.pc,
+                                                      m_ppc_state.feature_flags))
+        {
+          // Can't compile — fall back to interpreter
+          m_system.GetInterpreter().SingleStep();
+          m_ppc_state.downcount -= 1;
+          continue;
+        }
       }
 
-      if (block)
-      {
-        auto func = reinterpret_cast<void (*)()>(block->normalEntry);
-        u32 pc_before = m_ppc_state.pc;
-        func();
-        u32 pc_after = m_ppc_state.pc;
-        fprintf(stderr, "JITPROBE: after block, pc 0x%08X -> 0x%08X (dc=%d)\n",
-                pc_before, pc_after, m_ppc_state.downcount);
-        m_ppc_state.downcount -= static_cast<int>(block->originalSize);
-        if (++probe_count % 1000 == 1)
-          fprintf(stderr, "JITPROBE: pc 0x%08X -> 0x%08X (blocks=%llu, dc=%d)\n",
-                  pc_before, pc_after,
-                  (unsigned long long)probe_count, m_ppc_state.downcount);
-      }
-      else
-      {
-        u32 pc_before = m_ppc_state.pc;
-        interpreter.SingleStep();
-        m_ppc_state.downcount -= 1;
-        if (++probe_count % 1000 == 1)
-          fprintf(stderr, "JITPROBE: INTERP pc 0x%08X -> 0x%08X (blocks=%llu, dc=%d)\n",
-                  pc_before, m_ppc_state.pc,
-                  (unsigned long long)probe_count, m_ppc_state.downcount);
-      }
+      // Enter the JIT code via enter_code, which sets r12 = &ppcState and
+      // falls through to the dispatcher.  The dispatcher chains blocks
+      // internally (via JitPPC64Dispatch + block linking) until
+      // downcount ≤ 0, then returns to Run().
+      reinterpret_cast<void (*)()>(m_enter_code)();
     }
   }
-  }  // nested scope (extra brace)
-}  // Run()
+}
 
 void JitPPC64::SingleStep()
 {

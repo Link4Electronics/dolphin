@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <map>
 #include <vector>
 
 #include "Core/PowerPC/JitCommon/JitBase.h"
@@ -10,6 +11,13 @@
 
 // Forward declaration — defined in JitPPC64_Tables.cpp
 bool CanCompileInstruction(UGeckoInstruction inst);
+
+// C dispatch function — defined in JitPPC64_BackPatch.cpp
+extern "C" const u8* JitPPC64Dispatch(u32 pc);
+
+// Global JIT instance pointer (set during Init, used by asm dispatcher + signal handler)
+class JitPPC64;
+extern JitPPC64* g_jit_ppc64_instance;
 
 // State offsets computed at runtime via InitOffsets() — avoids
 // -Winvalid-offsetof on GCC (PowerPCState is non-standard-layout).
@@ -149,10 +157,25 @@ private:
   bool CompilePairedSingle(UGeckoInstruction inst);
   bool CompilePairedLoadStore(UGeckoInstruction inst);
 
-  // ---- Backpatch (JitPPC64_BackPatch.cpp) ----
+  // ---- Fastmem / Backpatch (JitPPC64_BackPatch.cpp) ----
+  struct FastmemArea
+  {
+    const u8* fast_access_code;  // start of the fast path range
+    const u8* slow_access_code;  // entry of the slow path in trampoline region
+    bool is_load;                // true for loads, false for stores
+    u32 rd;                      // PPC dest/src register field
+    u32 ra;                      // PPC base register (for update forms)
+  };
   void InitBackpatch();
   void ShutdownBackpatch();
-  void AddBackpatchEntry(const u8* code_addr, u32 guest_pc, u32 guest_address, u32 original_inst, u32 rd);
+  void AddBackpatchEntry(const u8* code_addr, u32 guest_pc, u32 guest_address,
+                          u32 original_inst, u32 rd);
+
+  // Emit both fast and slow paths for a load/store instruction.
+  // slow_path is emitted in the trampoline region; on fault the fast path
+  // is patched with a branch to it.
+  void EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd, u32 ra, u32 data_reg,
+                              bool is_load, bool is_fpr = false);
 
   // ---- Helpers (Jit.cpp) ----
   void LoadGPR(u32 host_reg, u32 guest_reg);
@@ -171,6 +194,17 @@ private:
   PPC64Assembler m_asm;
   JitPPC64RegCache gpr;
 
+  // Trampoline code region (adjacent to main code)
+  u8* m_tramp_region = nullptr;
+  u8* m_tramp_pos = nullptr;
+  u8* m_tramp_end = nullptr;
+  PPC64Assembler m_tramp_asm;
+
+  // Fastmem fault → slow handler map (keyed by fast_access_end)
+  // Stores the mapping from fast path range to slow path entry.
+  // upper_bound(fault_pc) finds the range, then check pc >= fast_access_code.
+  std::map<const u8*, FastmemArea> m_fault_to_handler;
+
   // Per-block JIT state
   u32 m_block_start = 0;
   u32 m_block_end = 0;
@@ -180,6 +214,9 @@ private:
   u8* m_code_region = nullptr;
   u8* m_code_pos = nullptr;
   u8* m_code_end = nullptr;
+
+  // enter_code entry point (called from Run(), sets r12 → falls through to dispatcher)
+  const u8* m_enter_code = nullptr;
 
   // Dispatcher entry point (for block exit linking)
   const u8* m_dispatcher_entry = nullptr;

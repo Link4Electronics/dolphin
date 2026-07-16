@@ -64,11 +64,11 @@ bool JitPPC64::CompileBC(UGeckoInstruction inst)
     m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, -1);
     m_asm.MTSPR(9, REG_SCRATCH2);
     m_asm.CMPLWI(0, REG_SCRATCH2, 0);
-    // BO=16/18: don't decrement CTR again (already done), check CR[2], branch by polarity
+    // BO=8/10: check CR[2] only, no CTR decrement (already done above via ADDI)
     if (ctr_eq_zero)
-      m_asm.BC(18, 2, 8);    // branch if eq=1 (CTR==0)
+      m_asm.BC(10, 2, 8);    // BO=10: branch if eq=1 (CTR==0) → skip r10=1
     else
-      m_asm.BC(16, 2, 8);    // branch if eq=0 (CTR!=0)
+      m_asm.BC(8, 2, 8);     // BO=8:  branch if eq=0 (CTR!=0) → skip r10=1
     m_asm.ADDI(10, 0, 1);
   }
 
@@ -77,11 +77,11 @@ bool JitPPC64::CompileBC(UGeckoInstruction inst)
     m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(CR_OFFSET));
     m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH, bi, 31, 31);
     m_asm.CMPWI(0, REG_SCRATCH2, 0);
-    // BO=18: branch if eq=1 (CR[BI]==0) ; BO=16: branch if eq=0 (CR[BI]==1)
+    // BO=8/10: check CR[2] only, no CTR decrement
     if (true_false)
-      m_asm.BC(16, 2, 8);    // branch if eq=0 (CR[BI]==1 → taken)
+      m_asm.BC(8, 2, 8);     // BO=8:  branch if eq=0 (CR[BI]==1) → skip r10=1
     else
-      m_asm.BC(18, 2, 8);    // branch if eq=1 (CR[BI]==0 → taken)
+      m_asm.BC(10, 2, 8);    // BO=10: branch if eq=1 (CR[BI]==0) → skip r10=1
     m_asm.ADDI(10, 0, 1);
   }
 
@@ -93,7 +93,7 @@ bool JitPPC64::CompileBC(UGeckoInstruction inst)
 
   m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(next_pc));
   m_asm.CMPWI(0, 10, 0);
-  m_asm.BC(16, 2, 8);        // BO=16: branch if eq=0 (r10!=0 → not-taken → keep next_pc)
+  m_asm.BC(8, 2, 8);         // BO=8:  branch if eq=0 (r10!=0 → not-taken → keep next_pc)
   m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(target));
 
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
@@ -189,9 +189,9 @@ bool JitPPC64::CompileBCLR(UGeckoInstruction inst)
     m_asm.MTSPR(9, REG_SCRATCH2);
     m_asm.CMPLWI(0, REG_SCRATCH2, 0);
     if (ctr_eq_zero)
-      m_asm.BC(18, 2, 8);    // branch if eq=1 (CTR==0)
+      m_asm.BC(10, 2, 8);    // BO=10: branch if eq=1 (CTR==0 → skip r10=1)
     else
-      m_asm.BC(16, 2, 8);    // branch if eq=0 (CTR!=0)
+      m_asm.BC(8, 2, 8);     // BO=8:  branch if eq=0 (CTR!=0 → skip r10=1)
     m_asm.ADDI(10, 0, 1);
   }
 
@@ -201,9 +201,9 @@ bool JitPPC64::CompileBCLR(UGeckoInstruction inst)
     m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH, bi, 31, 31);
     m_asm.CMPWI(0, REG_SCRATCH2, 0);
     if (true_false)
-      m_asm.BC(16, 2, 8);    // branch if eq=0 (CR[BI]==1 → taken)
+      m_asm.BC(8, 2, 8);     // BO=8:  branch if eq=0 (CR[BI]==1 → skip r10=1)
     else
-      m_asm.BC(18, 2, 8);    // branch if eq=1 (CR[BI]==0 → taken)
+      m_asm.BC(10, 2, 8);    // BO=10: branch if eq=1 (CR[BI]==0 → skip r10=1)
     m_asm.ADDI(10, 0, 1);
   }
 
@@ -215,7 +215,7 @@ bool JitPPC64::CompileBCLR(UGeckoInstruction inst)
 
   m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(next_pc));
   m_asm.CMPWI(0, 10, 0);
-  m_asm.BC(16, 2, 8);        // BO=16: branch if eq=0 (r10!=0 → not-taken → keep next_pc)
+  m_asm.BC(8, 2, 8);         // BO=8:  branch if eq=0 (r10!=0 → not-taken → keep next_pc)
   m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * 8));
   m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 29);
 
@@ -257,9 +257,9 @@ bool JitPPC64::CompileBCCTR(UGeckoInstruction inst)
   m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH, bi, 31, 31);
   m_asm.CMPWI(0, REG_SCRATCH2, 0);
   if (true_false)
-    m_asm.BC(16, 2, 8);    // branch if eq=0 (CR[BI]==1 → taken)
+    m_asm.BC(8, 2, 8);     // BO=8:  branch if eq=0 (CR[BI]==1 → skip r10=1)
   else
-    m_asm.BC(18, 2, 8);    // branch if eq=1 (CR[BI]==0 → taken)
+    m_asm.BC(10, 2, 8);    // BO=10: branch if eq=1 (CR[BI]==0 → skip r10=1)
   m_asm.ADDI(10, 0, 1);
 
   if (inst.LK)
@@ -270,7 +270,7 @@ bool JitPPC64::CompileBCCTR(UGeckoInstruction inst)
 
   m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(next_pc));
   m_asm.CMPWI(0, 10, 0);
-  m_asm.BC(16, 2, 8);        // BO=16: branch if eq=0 (r10!=0 → not-taken → keep next_pc)
+  m_asm.BC(8, 2, 8);         // BO=8:  branch if eq=0 (r10!=0 → not-taken → keep next_pc)
   m_asm.MFSPR(REG_SCRATCH, 9);
   m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 29);
 
