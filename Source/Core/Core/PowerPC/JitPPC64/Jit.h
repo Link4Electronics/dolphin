@@ -152,7 +152,7 @@ private:
   // ---- Backpatch (JitPPC64_BackPatch.cpp) ----
   void InitBackpatch();
   void ShutdownBackpatch();
-  void AddBackpatchEntry(const u8* code_addr, u32 guest_pc, u32 guest_address, u32 opcd, u32 rd);
+  void AddBackpatchEntry(const u8* code_addr, u32 guest_pc, u32 guest_address, u32 original_inst, u32 rd);
 
   // ---- Helpers (Jit.cpp) ----
   void LoadGPR(u32 host_reg, u32 guest_reg);

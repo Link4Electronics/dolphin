@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <signal.h>
 #include <unistd.h>
 #include <sys/mman.h>
 
@@ -31,6 +32,10 @@ u32 DOWNCOUNT_OFFSET = 0;
 u32 SPR_OFFSET = 0;
 u32 MSR_OFFSET = 0;
 u32 PS_OFFSET = 0;
+
+// Signal handler for MMIO backpatching
+static JitPPC64* s_jit_instance = nullptr;
+static struct sigaction s_old_sigsegv;
 
 static void InitOffsets(const PowerPC::PowerPCState& state)
 {
@@ -68,7 +73,14 @@ static void FreeCodeRegion(u8* ptr, size_t size)
 }
 
 // Stack frame for compiled blocks (ELFv2 PPC64 ABI)
-static constexpr u32 FRAME_SIZE = 64;
+// Stack frame layout:
+//   0(r1)  : backchain
+//  16(r1)  : LR save (caller's frame)
+//  24(r1)  : TOC save (r2)
+//  32(r1)..176(r1): callee-saved r14-r31 (18 × 8 = 144 bytes)
+// 176(r1)..256(r1): alignment + parameter save
+static constexpr u32 FRAME_SIZE = 256;
+static constexpr u32 CALLEE_SAVE_BASE = 32;
 
 // ===========================================================================
 // JitPPC64BlockCache
@@ -122,6 +134,24 @@ void JitPPC64BlockCache::WriteDestroyBlock(const JitBlock& block)
 JitPPC64::JitPPC64(Core::System& system) : JitBase(system) {}
 JitPPC64::~JitPPC64() { Shutdown(); }
 
+static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
+{
+  auto* uc = static_cast<ucontext_t*>(ucontext_arg);
+  auto* ctx = &uc->uc_mcontext;
+
+  uintptr_t access_addr = reinterpret_cast<uintptr_t>(info->si_addr);
+
+  if (s_jit_instance && s_jit_instance->HandleFault(access_addr, ctx))
+    return;
+
+  // Not a JIT MMIO fault — restore default handler and re-raise so the
+  // process crashes with a proper core dump / debugger notification.
+  struct sigaction sa_default = {};
+  sa_default.sa_handler = SIG_DFL;
+  sigaction(SIGSEGV, &sa_default, nullptr);
+  raise(SIGSEGV);
+}
+
 void JitPPC64::Init()
 {
   RefreshConfig();
@@ -146,10 +176,22 @@ void JitPPC64::Init()
 
   NOTICE_LOG_FMT(POWERPC, "JITPPC64: initialized (code={}, size={})",
                  fmt::ptr(m_code_region), JIT_CODE_SIZE);
+
+  // Install SIGSEGV handler for MMIO backpatching
+  s_jit_instance = this;
+  struct sigaction sa = {};
+  sa.sa_sigaction = SIGSEGVHandler;
+  sa.sa_flags = SA_SIGINFO;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGSEGV, &sa, &s_old_sigsegv);
 }
 
 void JitPPC64::Shutdown()
 {
+  // Restore old SIGSEGV handler
+  sigaction(SIGSEGV, &s_old_sigsegv, nullptr);
+  s_jit_instance = nullptr;
+
   ShutdownBackpatch();
   m_block_cache.Shutdown();
   FreeCodeRegion(m_code_region, JIT_CODE_SIZE);
@@ -187,6 +229,10 @@ void JitPPC64::EmitProlog()
   m_asm.STD(REG_SCRATCH, 1, 16);
   m_asm.STDU(1, 1, -static_cast<s32>(FRAME_SIZE));
 
+  // Save callee-saved registers r14-r31 (used by RegCache)
+  for (u32 i = 14; i <= 31; ++i)
+    m_asm.STD(i, 1, static_cast<s32>(CALLEE_SAVE_BASE + (i - 14) * 8));
+
   u64 addr = reinterpret_cast<u64>(&m_ppc_state);
   if (addr > 0xFFFFFFFFULL)
   {
@@ -218,6 +264,10 @@ void JitPPC64::EmitEpilog(u32 next_pc)
 
   m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(next_pc));
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
+
+  // Restore callee-saved registers r14-r31 (r1 still points to callee frame)
+  for (u32 i = 14; i <= 31; ++i)
+    m_asm.LD(i, 1, static_cast<s32>(CALLEE_SAVE_BASE + (i - 14) * 8));
 
   m_asm.ADDI(1, 1, FRAME_SIZE);
   m_asm.LD(REG_SCRATCH, 1, 16);

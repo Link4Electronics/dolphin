@@ -111,12 +111,6 @@ public:
 
   void Clear();
 
-  // NCE guest memory mapping — maps SHM-backed physical memory at guest
-  // addresses (0x00000000, 0x80000000 alias, 0xC0000000 alias) so that
-  // native code execution can access guest memory directly.
-  bool InitNCEGuestMapping();
-  void ShutdownNCEGuestMapping();
-
   // Routines to access physically addressed memory, designed for use by
   // emulated hardware outside the CPU. Use "Device_" prefix.
   std::string GetString(u32 em_address, size_t size = 0);

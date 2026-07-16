@@ -43,7 +43,7 @@ bool CanCompileInstruction(UGeckoInstruction inst)
     case 19:  case 24:  case 26:  case 28:  case 32:
     case 40:  case 60:  case 75:  case 83:  case 124:
     case 144: case 146: case 235: case 266: case 284:
-    case 316: case 339: case 371: case 412: case 444:
+    case 316: case 339: case 412: case 444:
     case 459: case 467: case 476: case 491:
     case 536: case 792: case 824: case 922: case 954:
     case 104: case 986:
@@ -51,6 +51,10 @@ bool CanCompileInstruction(UGeckoInstruction inst)
     // CA-using ops
     case 136: case 138: case 200: case 202:
     case 232: case 234:
+      return true;
+
+    // mftb / mfspr (timebase + privileged SPRs)
+    case 371:
       return true;
 
     // Integer indexed loads/stores
@@ -81,14 +85,12 @@ bool CanCompileInstruction(UGeckoInstruction inst)
     }
   }
 
-  // Integer D-form loads/stores (including update/lmw/stmw) + FPU D-form
-  case 32: case 33: case 34: case 35:
-  case 36: case 37: case 38: case 39:
-  case 40: case 41: case 42: case 43:
-  case 44: case 45: case 46: case 47:
-  case 48: case 49: case 50: case 51:
-  case 52: case 53: case 54: case 55:
-    return true;
+  // Integer D-form loads/stores + FPU D-form — DISABLED on PPC64 because
+  // the signal handler infrastructure (SIGSEGV → HandleFault) requires
+  // mcontext_t to be compatible with struct sigcontext, which isn't the
+  // case on glibc PPC64.  These fall through to the interpreter, which
+  // correctly handles MMIO accesses via Memory::Read/Write.
+  // TODO: re-enable when HandleFault works on PPC64.
 
   case 18:  // b
     return true;
