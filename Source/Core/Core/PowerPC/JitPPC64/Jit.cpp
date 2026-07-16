@@ -251,8 +251,11 @@ static bool IsP0Instruction(u32 instr)
     if (xo == 339)
     {
       const u32 spr = ((instr >> 11) & 0x1F) << 5 | ((instr >> 16) & 0x1F);
+      // Gekko-specific SPRs that overlap with PPC970 registers or return
+      // real HW values instead of emulated.  SPR 528-543 = Gekko BATs
+      // (L2CR/L3CR/MMUCFG/reserved on PPC970 — writes corrupt HW state).
       if (spr == 287 || spr == 268 || spr == 269 ||
-          spr >= 912)
+          (spr >= 528 && spr <= 543) || spr >= 912)
         return true;
     }
     // mtspr (xo=467): same categories as mfspr.  Writes to non-existent or
@@ -260,7 +263,8 @@ static bool IsP0Instruction(u32 instr)
     if (xo == 467)
     {
       const u32 spr = ((instr >> 11) & 0x1F) << 5 | ((instr >> 16) & 0x1F);
-      if (spr >= 912)
+      // Gekko BATs 528-543 overlap with PPC970 L2CR/L3CR/MMUCFG etc.
+      if ((spr >= 528 && spr <= 543) || spr >= 912)
         return true;
     }
   }
