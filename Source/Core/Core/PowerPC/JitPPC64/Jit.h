@@ -192,6 +192,13 @@ private:
   // Estimated cycles consumed per native execution block
   static constexpr u32 CYCLES_PER_BLOCK = 128;
 
+  // Real-time-based timebase tracking: at each Advance() we record the
+  // fake_TB_start_value and CLOCK_MONOTONIC time.  The P0 handler reads
+  // the current time and adds the elapsed TB ticks, giving sub-2ms
+  // TB granularity for guest polling loops.
+  struct timespec m_last_tb_time{};
+  u64 m_last_fake_tb_val = 0;
+
   // dcbz → trap patch state
   std::unordered_map<u32, u32> m_patched_dcbz;  // NCE addr → original instruction
   bool m_dcbz_patches_applied = false;

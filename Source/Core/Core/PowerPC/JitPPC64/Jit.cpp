@@ -10,6 +10,7 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
+#include <time.h>
 #include <ucontext.h>
 #include <sched.h>
 
@@ -170,6 +171,7 @@ void JitPPC64::Init()
 
   asm volatile("mr %0, %%r2\n\t" : "=r"(m_host_sda[0]));
   asm volatile("mr %0, %%r13\n\t" : "=r"(m_host_sda[1]));
+  clock_gettime(CLOCK_MONOTONIC, &m_last_tb_time);
   NOTICE_LOG_FMT(POWERPC, "NCE Init done");
 }
 
@@ -700,7 +702,7 @@ void JitPPC64::ScanP0()
   // unlikely.  Covers the GC IPL loaded at 0x81200000 (K1 offset 0x01200000
   // = 18 MB) which is beyond the 2 MB opcd=4 scan limit but contains
   // critical mtspr/mfspr/mtmsr instructions that must be P0-trapped.
-  const u32 full_scan_end = std::min(ram_size_val, 0x01000000u);  // 16 MB
+  const u32 full_scan_end = std::min(ram_size_val, 0x02000000u);  // 32 MB — covers GC IPL at K1 offset 0x01200000 (18 MB) and Wii code
   for (u32 offset = first_2mb_end; offset + 4 <= full_scan_end; offset += 4)
   {
     const u32 addr = 0x80000000u + offset;
@@ -731,7 +733,7 @@ void JitPPC64::ScanP0()
         m_patched_p0[addr] = instr;
     }
     // Full EXRAM scan for non-ps_* patterns (16 MB limit).
-    const u32 exram_full_end = std::min(exram_size_val, 0x01000000u);
+    const u32 exram_full_end = std::min(exram_size_val, 0x02000000u);  // 32 MB
     for (u32 offset = exram_2mb_end; offset + 4 <= exram_full_end; offset += 4)
     {
       const u32 addr = 0x90000000u + offset;
@@ -1008,6 +1010,16 @@ void JitPPC64::Run()
          }() == CPU::State::Running)
   {
     core_timing.Advance();
+
+    // Record TB baseline for real-time-based timebase in the P0 handler.
+    // The mftb-based downcount approach is too coarse (2ms ALRM interval) for
+    // guest polling loops — they appear frozen and never exit.  We track the
+    // real CLOCK_MONOTONIC time alongside fake_TB_start_value so the P0
+    // handler can compute a smoothly-advancing TB between Advance() calls.
+    {
+      clock_gettime(CLOCK_MONOTONIC, &m_last_tb_time);
+      m_last_fake_tb_val = core_timing.GetGlobals().fake_TB_start_value;
+    }
 
     // Volatile load: the ALRM signal handler modifies downcount in memory
     // asynchronously.  __atomic_load_n with __ATOMIC_RELAXED does NOT prevent
@@ -2808,19 +2820,22 @@ void JitPPC64::HandleSIGILL(int sig, siginfo_t* info, void* uctx)
 
     if ((is_mftb || is_mfspr_tb) && is_tb_read)
     {
-      // Compute the current cycle count including cycles since last Advance().
-      const auto& globals = m_system.GetCoreTiming().GetGlobals();
-      const s64 downcount_cycles = static_cast<s64>(
-          static_cast<double>(m_ppc_state.downcount) *
-          globals.last_OC_factor_inverted);
-      const s64 cycles_since_advance =
-          globals.slice_length - downcount_cycles;
-      const s64 current_cycles = globals.global_timer + cycles_since_advance;
-      const s64 tb_delta = current_cycles - globals.fake_TB_start_ticks;
-
-      // TB = TB_start + tb_delta / TIMER_RATIO  (TIMER_RATIO = 12).
-      const u64 tb = globals.fake_TB_start_value +
-                     (tb_delta > 0 ? static_cast<u64>(tb_delta) / 12 : 0ULL);
+      // Compute the timebase from real time elapsed since the last Advance().
+      // The downcount-based approach (used by Jit64) is too coarse during NCE:
+      // downcount only decrements on ALRM (every 2ms), so the TB appears frozen
+      // for up to 2ms and guest polling loops (mftb; cmpwi; blt) never exit.
+      //
+      // We track m_last_tb_time and m_last_fake_tb_val at each Advance() call,
+      // then compute TB = fake_TB_start_value + elapsed_ns * 40.5MHz.
+      struct timespec now;
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      u64 elapsed_ns =
+          (static_cast<u64>(now.tv_sec) - static_cast<u64>(m_last_tb_time.tv_sec)) *
+              1000000000ULL +
+          (static_cast<u64>(now.tv_nsec) - static_cast<u64>(m_last_tb_time.tv_nsec));
+      // Gekko TB = core_clk / 12 = 486 MHz / 12 = 40.5 MHz.
+      // TB ticks since last Advance = elapsed_ns * 405 / 10000.
+      u64 tb = m_last_fake_tb_val + (elapsed_ns * 405ULL) / 10000ULL;
 
       m_ppc_state.spr[SPR_TL] = static_cast<u32>(tb);
       m_ppc_state.spr[SPR_TU] = static_cast<u32>(tb >> 32);
