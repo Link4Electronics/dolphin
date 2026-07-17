@@ -9,11 +9,31 @@
 #include "Core/PowerPC/JitPPC64/JitPPC64_RegCache.h"
 #include "Core/PowerPC/JitPPC64/PPC64Assembler.h"
 
+// Emit a 64-bit immediate load into a PPC64 assembler.
+// Used by EmitBackpatchRoutine and CompileMFTB to load function addresses.
+inline void TrampMOVI64(PPC64Assembler& asm_, u32 rd, u64 imm)
+{
+  const auto h4 = static_cast<s32>((imm >> 48) & 0xFFFF);
+  const auto h3 = static_cast<u32>((imm >> 32) & 0xFFFF);
+  const auto h2 = static_cast<u32>((imm >> 16) & 0xFFFF);
+  const auto lo = static_cast<u32>(imm & 0xFFFF);
+  asm_.ADDIS(rd, 0, h4);
+  asm_.RLDICL(rd, rd, 0, 32);
+  asm_.ORI(rd, rd, h3);
+  asm_.RLDICR(rd, rd, 32, 31);
+  asm_.ORIS(rd, rd, h2);
+  asm_.ORI(rd, rd, lo);
+}
+
 // Forward declaration — defined in JitPPC64_Tables.cpp
 bool CanCompileInstruction(UGeckoInstruction inst);
 
 // C dispatch function — defined in JitPPC64_BackPatch.cpp
 extern "C" const u8* JitPPC64Dispatch(u32 pc);
+extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
+                                    u32 is_store, u32 access_size,
+                                    u32 rd, u32 ra, u64 store_value);
+extern "C" u64 JitPPC64RefreshTimebase(PowerPC::PowerPCState* state);
 
 // Global JIT instance pointer (set during Init, used by asm dispatcher + signal handler)
 class JitPPC64;

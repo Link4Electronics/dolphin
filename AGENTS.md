@@ -11,6 +11,7 @@
 
 ## Build
 
+AI agent runs on x86_64, so agent isn't allowed to build, user builds on powerpc 64bit big-edian machine, test and bring the results back
 User is the one who always build, but the build cmake setup used is this
 ```bash
 cmake -B build -S . \

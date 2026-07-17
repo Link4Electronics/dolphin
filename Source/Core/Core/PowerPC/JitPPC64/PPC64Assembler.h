@@ -161,17 +161,19 @@ public:
   void BA(u32 target) { B(target, true, false); }
 
   // Branch relative to a pointer (within ±32MB from current position)
+  // LI is at PPC bits 6-29 = u32 bits [25:2]; we compute d in bytes, shift
+  // right by 2 to get word offset, and shift left by 2 to place at [25:2].
   void BRel(const u8* target)
   {
     ptrdiff_t d = target - (m_code + m_pos);
     u32 li = (static_cast<u32>(d >> 2)) & 0x00FFFFFF;
-    Write32((18u << 26) | li);
+    Write32((18u << 26) | (li << 2));
   }
   void BLRel(const u8* target)
   {
     ptrdiff_t d = target - (m_code + m_pos);
     u32 li = (static_cast<u32>(d >> 2)) & 0x00FFFFFF;
-    Write32((18u << 26) | li | 1u);
+    Write32((18u << 26) | (li << 2) | 1u);
   }
 
   // bc BO, BI, BD [, AA, LK]

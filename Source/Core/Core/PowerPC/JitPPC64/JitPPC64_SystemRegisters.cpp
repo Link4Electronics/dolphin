@@ -69,12 +69,26 @@ bool JitPPC64::CompileMFTB(UGeckoInstruction inst)
   u32 spr = (inst.SPRU << 5) | (inst.SPRL & 0x1F);
   if (spr == SPR_TL || spr == SPR_TU)
   {
-    // Read the SPR value as set by JitPPC64Dispatch from GetFakeTimeBase().
-    // The timebase is refreshed before every block dispatch, so the cached
-    // SPR_OFFSET value is always up-to-date when the block starts.
-    // Within a block that loops (like the IPL timing loop), each iteration
-    // goes through the dispatcher, re-reading the fresh timebase values.
-    m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * spr));
+    // Call JitPPC64RefreshTimebase(ppcState) to refresh spr[TL/TU] from
+    // CoreTiming's GetFakeTimeBase().  This ensures the timebase advances
+    // even within backwards-branch loops (branch instructions stay inside
+    // the compiled block and never hit the dispatcher).
+    //
+    // We save/restore REG_PPC_BASE (r12) around the call — the function
+    // follows ELFv2 ABI and may clobber volatile registers.
+    m_asm.STD(REG_PPC_BASE, 1, 24);  // save r12 at block frame + 24 (free area)
+    m_asm.MR(3, REG_PPC_BASE);        // r3 = ppcState*
+    TrampMOVI64(m_asm, 12, reinterpret_cast<u64>(&JitPPC64RefreshTimebase));
+    m_asm.MTCTR(12);
+    m_asm.BCTRL();                    // call — returns u64 in r3
+    m_asm.LD(REG_PPC_BASE, 1, 24);   // restore r12
+
+    // r3 = full 64-bit timebase value
+    if (spr == SPR_TL)
+      m_asm.CLR32(REG_SCRATCH, 3);   // extract lower 32 bits
+    else
+      m_asm.RLDICL(REG_SCRATCH, 3, 32, 32);  // extract upper 32 bits
+
     StoreGPR(rd, REG_SCRATCH);
     return true;
   }

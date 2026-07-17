@@ -10,6 +10,7 @@
 #include "Core/HW/SystemTimers.h"
 #include "Core/HW/MMIO.h"
 #include "Core/HW/Memmap.h"
+#include "VideoCommon/EFBInterface.h"
 #include "Core/System.h"
 
 // ===========================================================================
@@ -76,8 +77,124 @@ extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
                                      u32 is_store, u32 access_size,
                                      u32 rd, u32 ra, u64 store_value)
 {
-  auto& memory = Core::System::GetInstance().GetMemory();
+  auto& system = Core::System::GetInstance();
+  auto& memory = system.GetMemory();
 
+  // Convert guest virtual address to physical.
+  // The JIT accesses MMIO through K1 uncached aliases (0xC0000000-0xCFFFFFFF)
+  // and also through K2 cached aliases (0x80000000-0xBFFFFFFF).  Masking with
+  // 0x3FFFFFFF converts all K1/K2 aliases to physical 0x00000000-0x0FFFFFFF,
+  // which is the canonical address used by MMIO dispatch and GetSpanForAddress.
+  const u32 phys_ea = ea & 0x3FFFFFFF;
+
+  // Check for EFB/MMIO access (physical range 0x08000000-0x0FFFFFFF).
+  // The interpreter uses the same check in WriteToHardware / ReadFromHardware.
+  if ((phys_ea & 0xF8000000) == 0x08000000)
+  {
+    if (phys_ea >= 0x0C000000)
+    {
+      // MMIO access — dispatch through the function table
+      if (is_store)
+      {
+        switch (access_size)
+        {
+        case 8:
+          memory.GetMMIOMapping()->Write<u8>(system, phys_ea, static_cast<u8>(store_value));
+          break;
+        case 16:
+          memory.GetMMIOMapping()->Write<u16>(system, phys_ea, static_cast<u16>(store_value));
+          break;
+        case 32:
+          memory.GetMMIOMapping()->Write<u32>(system, phys_ea, static_cast<u32>(store_value));
+          break;
+        default:
+          break;
+        }
+        if (ra != 0)
+          state->gpr[ra] = ea;
+        return 0;
+      }
+      else
+      {
+        u64 result = 0;
+        switch (access_size)
+        {
+        case 8:
+          result = memory.GetMMIOMapping()->Read<u8>(system, phys_ea);
+          break;
+        case 16:
+          result = memory.GetMMIOMapping()->Read<u16>(system, phys_ea);
+          break;
+        case 32:
+          result = memory.GetMMIOMapping()->Read<u32>(system, phys_ea);
+          break;
+        default:
+          break;
+        }
+        if (access_size < 64)
+          state->gpr[rd] = static_cast<u32>(result);
+        else
+          state->ps[rd].ps0 = result;
+        if (ra != 0)
+          state->gpr[ra] = ea;
+        return result;
+      }
+    }
+    else
+    {
+      // EFB access (0x08000000-0x0BFFFFFF) — route through EFB interface
+      // The interpreter also uses this range for the framebuffer.
+      const u32 x = (phys_ea & 0xfff) >> 2;
+      const u32 y = (phys_ea >> 12) & 0x3ff;
+      if (is_store)
+      {
+        const u32 data = static_cast<u32>(store_value);
+        if (phys_ea & 0x00800000)
+        {
+          ERROR_LOG_FMT(MEMMAP, "Unimplemented Z+Color EFB write. {:08x} @ {:#010x}", data,
+                        phys_ea);
+        }
+        else if (phys_ea & 0x00400000)
+        {
+          g_efb_interface->PokeDepth(x, y, data);
+        }
+        else
+        {
+          g_efb_interface->PokeColor(x, y, data);
+        }
+        if (ra != 0)
+          state->gpr[ra] = ea;
+        return 0;
+      }
+      else
+      {
+        u32 result = 0;
+        if (phys_ea & 0x00800000)
+        {
+          ERROR_LOG_FMT(MEMMAP, "Unimplemented Z+Color EFB read @ {:#010x}", phys_ea);
+        }
+        else if (phys_ea & 0x00400000)
+        {
+          result = g_efb_interface->PeekDepth(x, y);
+        }
+        else
+        {
+          result = g_efb_interface->PeekColor(x, y);
+        }
+        if (access_size < 64)
+          state->gpr[rd] = static_cast<u32>(result);
+        else
+          state->ps[rd].ps0 = result;
+        if (ra != 0)
+          state->gpr[ra] = ea;
+        return result;
+      }
+    }
+  }
+
+  // Not MMIO — use the slow Memory:: path (RAM, EXRAM, etc.)
+  // GetSpanForAddress internally does address &= 0x3FFFFFFF, so we pass
+  // the original ea (not phys_ea) for consistency with the interpreter.
   if (is_store)
   {
     switch (access_size)
@@ -124,6 +241,27 @@ extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
 // ===========================================================================
 // JitPPC64Dispatch — asm-friendly block lookup
 //
+// ===========================================================================
+// JitPPC64RefreshTimebase — refresh spr[TL/TU] from CoreTiming
+//
+// Called from within compiled blocks (via CompileMFTB) to ensure the
+// emulated timebase advances even inside backwards-branch loops.
+//
+// Signature (ELFv2 ABI):
+//   r3 = PowerPCState*
+// Returns: u64 timebase value
+// Side effect: writes TL/TU to ppcState->spr[]
+// ===========================================================================
+extern "C" u64 JitPPC64RefreshTimebase(PowerPC::PowerPCState* state)
+{
+  auto& system = Core::System::GetInstance();
+  const u64 tb = system.GetSystemTimers().GetFakeTimeBase();
+  state->spr[SPR_TL] = static_cast<u32>(tb);
+  state->spr[SPR_TU] = static_cast<u32>(tb >> 32);
+  return tb;
+}
+
+// ===========================================================================
 // Called from the generated dispatcher code in CompileDispatcher().
 // Signature (ELFv2 ABI, r3 = first arg):
 //   u32 pc — the current guest PC (from ppcState after last block executed)
@@ -191,9 +329,10 @@ bool JitPPC64::HandleFault(uintptr_t access_address, SContext* ctx)
       const Common::ScopedJITPageWriteAndNoExecute enable_jit_page_writes;
 
       // Compute relative branch: b slow_access_code
+      // LI must be at PPC bits 6-29 = u32 bits [25:2], hence the << 2 shift.
       ptrdiff_t dist = area.slow_access_code - area.fast_access_code;
       u32 li = (static_cast<u32>(dist >> 2)) & 0x00FFFFFF;
-      u32 branch = (18u << 26) | li;
+      u32 branch = (18u << 26) | (li << 2);
 
       // Overwrite the entire fast path range
       std::memcpy(const_cast<u8*>(area.fast_access_code), &branch, sizeof(branch));

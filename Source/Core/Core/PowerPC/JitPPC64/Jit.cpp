@@ -86,21 +86,7 @@ static void FreeCodeRegion(u8* ptr, size_t size)
     munmap(ptr, size);
 }
 
-// Emit a 64-bit immediate load into the trampoline assembler.
-// Uses existing assembler methods to avoid manual encoding bugs.
-static void TrampMOVI64(PPC64Assembler& asm_, u32 rd, u64 imm)
-{
-  const auto h4 = static_cast<s32>((imm >> 48) & 0xFFFF);
-  const auto h3 = static_cast<u32>((imm >> 32) & 0xFFFF);
-  const auto h2 = static_cast<u32>((imm >> 16) & 0xFFFF);
-  const auto lo = static_cast<u32>(imm & 0xFFFF);
-  asm_.ADDIS(rd, 0, h4);
-  asm_.RLDICL(rd, rd, 0, 32);          // clrldi rd, rd, 32
-  asm_.ORI(rd, rd, h3);
-  asm_.RLDICR(rd, rd, 32, 31);          // rotl lower 32 → upper 32, keep upper half
-  asm_.ORIS(rd, rd, h2);
-  asm_.ORI(rd, rd, lo);
-}
+
 
 // Stack frame for compiled blocks (ELFv2 PPC64 ABI)
 // Stack frame layout:
@@ -537,9 +523,13 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
   m_tramp_asm.SetBase(m_tramp_pos, static_cast<size_t>(m_tramp_end - m_tramp_pos));
 
   // Save volatile registers (r0, r3-r10) + LR
+  // NOTE: r0 (REG_SCRATCH) may hold the store value for stores.
+  // We must save it before MFLR clobbers it.
+  m_tramp_asm.STD(REG_SCRATCH, 1, 8);  // save store value (r0) at block frame + 8
   m_tramp_asm.MFLR(0);
   m_tramp_asm.STDU(REG_SCRATCH, 1, -128);
   m_tramp_asm.STD(0, 1, 120);   // save LR
+  m_tramp_asm.LD(REG_SCRATCH, 1, 136);  // restore r0 from block frame + 8
   m_tramp_asm.STD(3, 1, 112);
   m_tramp_asm.STD(4, 1, 104);
   m_tramp_asm.STD(5, 1, 96);
