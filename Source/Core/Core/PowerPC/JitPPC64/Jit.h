@@ -221,6 +221,11 @@ private:
   // Dispatcher entry point (for block exit linking)
   const u8* m_dispatcher_entry = nullptr;
 
+  // Shared exit sequence: restores host regs, tears down frame, BLR to Run().
+  // Both the epilog and branch compilers branch here instead of inline BLR,
+  // ensuring r10/r14-r31 are always restored and the frame is always torn down.
+  const u8* m_exit_sequence = nullptr;
+
   // Register usage in compiled code:
   // r12 = ppcState pointer
   // r11 = scratch

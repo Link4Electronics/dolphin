@@ -97,7 +97,7 @@ static void TrampMOVI64(PPC64Assembler& asm_, u32 rd, u64 imm)
   asm_.ADDIS(rd, 0, h4);
   asm_.RLDICL(rd, rd, 0, 32);          // clrldi rd, rd, 32
   asm_.ORI(rd, rd, h3);
-  asm_.RLDICR(rd, rd, 32, 31);          // sldi rd, rd, 32
+  asm_.RLDICR(rd, rd, 32, 31);          // rotl lower 32 → upper 32, keep upper half
   asm_.ORIS(rd, rd, h2);
   asm_.ORI(rd, rd, lo);
 }
@@ -291,12 +291,19 @@ void JitPPC64::CompileDispatcher()
   TrampMOVI64(m_asm, 11, reinterpret_cast<u64>(&s_ppc_state_addr));
   m_asm.LD(REG_PPC_BASE, 11, 0);     // r12 = *(s_ppc_state_addr)
 
+  // Save r10 on a small stack frame — r10 is volatile in ELFv2, but
+  // compiled blocks clobber it (CompileBC uses it as a not-taken flag).
+  // We restore it before BCTR (block entry) or BLR (exit) so that Run()'s
+  // C++ code always sees the original r10 value.
+  m_asm.STDU(1, 1, -32);
+  m_asm.STD(10, 1, 24);
+
   // ── dispatcher entry (called from block epilogs) ──────────────────────
   // Register state at entry:
   //   r12      = &ppcState  (re-established by enter_code or previous block's prolog)
   //   r14-r31  = host callee-saved regs (preserved by block epilog)
   //   LR       = return address inside Run()
-  //   r1       = host stack
+  //   r1       = host stack — 32 bytes allocated above (r10 saved at r1+24)
   //
   // We emit branches with placeholder offsets and patch them after we know
   // all positions (the assembler has no label support).
@@ -323,13 +330,17 @@ void JitPPC64::CompileDispatcher()
   m_asm.BC(12, 2, 0);  // BO=12 (true), BI=2 (EQ) → beq
 
   // ── Success path: jump to block entry ──────────────────────────────────
-  m_asm.MTLR(14);      // restore Run_LR (block prolog will re-save it)
-  m_asm.MTCTR(3);      // block → CTR
-  m_asm.BCTR();        // jump to block (LR preserved, prolog saves it)
+  m_asm.LD(10, 1, 24);   // restore r10 from dispatcher frame
+  m_asm.ADDI(1, 1, 32);  // tear down dispatcher frame
+  m_asm.MTLR(14);        // restore Run_LR (block prolog will re-save it)
+  m_asm.MTCTR(3);        // block → CTR
+  m_asm.BCTR();          // jump to block (LR preserved = Run_LR)
 
   // ── Exit path: return to Run() ────────────────────────────────────────
   const u8* exit_pos = m_asm.Code() + m_asm.Size();
-  m_asm.MTLR(14);      // restore Run_LR
+  m_asm.LD(10, 1, 24);   // restore r10
+  m_asm.ADDI(1, 1, 32);  // tear down dispatcher frame
+  m_asm.MTLR(14);        // restore Run_LR
   m_asm.BLR();
 
   // ── Patch placeholder branch offsets ───────────────────────────────────
@@ -346,6 +357,24 @@ void JitPPC64::CompileDispatcher()
   std::memcpy(const_cast<u8*>(ble_pos), &ble_enc, sizeof(ble_enc));
   std::memcpy(const_cast<u8*>(beq_pos), &beq_enc, sizeof(beq_enc));
 
+  // ── Shared block exit sequence ─────────────────────────────────────────
+  // This is branched to from EVERY compiled block (both via the epilog and
+  // directly from branch compilers).  It restores host registers that the
+  // block may have clobbered, tears down the block's stack frame, restores
+  // LR from the parent frame, and BLRs back to Run().
+  //
+  // r1 must point to the block's frame (i.e., before frame tear-down).
+  // r12 must be REG_PPC_BASE (&ppcState) for the STW/STB in the epilog.
+  // PC_OFFSET must have already been written with the next guest PC.
+  m_exit_sequence = m_asm.Code() + m_asm.Size();
+  m_asm.LD(10, 1, static_cast<s32>(CALLEE_SAVE_BASE + (31 - 14 + 1) * 8));
+  for (u32 i = 14; i <= 31; ++i)
+    m_asm.LD(i, 1, static_cast<s32>(CALLEE_SAVE_BASE + (i - 14) * 8));
+  m_asm.ADDI(1, 1, FRAME_SIZE);
+  m_asm.LD(REG_SCRATCH, 1, 16);
+  m_asm.MTLR(REG_SCRATCH);
+  m_asm.BLR();
+
   m_code_pos = const_cast<u8*>(m_asm.Code() + m_asm.Size());
 }
 
@@ -359,7 +388,9 @@ void JitPPC64::EmitProlog()
   m_asm.STD(REG_SCRATCH, 1, 16);
   m_asm.STDU(1, 1, -static_cast<s32>(FRAME_SIZE));
 
-  // Save callee-saved registers r14-r31 (used by RegCache)
+  // Save volatile register r10 (clobbered by CompileBC as not-taken flag)
+  // and callee-saved registers r14-r31 (used by RegCache)
+  m_asm.STD(10, 1, static_cast<s32>(CALLEE_SAVE_BASE + (31 - 14 + 1) * 8));
   for (u32 i = 14; i <= 31; ++i)
     m_asm.STD(i, 1, static_cast<s32>(CALLEE_SAVE_BASE + (i - 14) * 8));
 
@@ -392,17 +423,11 @@ void JitPPC64::EmitEpilog(u32 next_pc)
 {
   gpr.Flush();
 
-  m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(next_pc));
+  m_asm.LI32(REG_SCRATCH, next_pc);
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
 
-  // Restore callee-saved registers r14-r31 (r1 still points to callee frame)
-  for (u32 i = 14; i <= 31; ++i)
-    m_asm.LD(i, 1, static_cast<s32>(CALLEE_SAVE_BASE + (i - 14) * 8));
-
-  m_asm.ADDI(1, 1, FRAME_SIZE);
-  m_asm.LD(REG_SCRATCH, 1, 16);
-  m_asm.MTLR(REG_SCRATCH);
-  m_asm.BLR();
+  // Branch to the shared exit sequence (register restore + frame tear-down + BLR)
+  m_asm.BRel(m_exit_sequence);
 }
 
 // ===========================================================================
@@ -545,28 +570,16 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
     }
   }
 
+  // Save REG_PPC_BASE (r12) before the call — TrampolineDispatcher clobbers
+  // it, but we need ppcState after the register restore to reload loaded
+  // values for both integer (gpr[rd]) and FPU (ps[rd]) loads.
+  m_tramp_asm.STD(REG_PPC_BASE, 1, 48);
+
   // Call TrampolineDispatcher via absolute address
   TrampMOVI64(m_tramp_asm, 12,
               reinterpret_cast<u64>(&TrampolineDispatcher));
   m_tramp_asm.MTCTR(12);
   m_tramp_asm.BCTRL();
-
-  // For loads: return value in r3
-  if (is_load)
-  {
-    if (is_fpr)
-    {
-      // FPU load: dispatcher wrote to state->ps[rd]; load f0 from ppcState
-      // so the STFD after the fast path stores the correct value
-      m_tramp_asm.LFD(0, REG_PPC_BASE,
-                       static_cast<s32>(PS_OFFSET + rd * 16));
-    }
-    else
-    {
-      // Integer load: copy result to data_reg (r3 has the value)
-      m_tramp_asm.MR(data_reg, 3);
-    }
-  }
 
   // Restore registers
   m_tramp_asm.LD(10, 1, 56);
@@ -579,11 +592,42 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
   m_tramp_asm.LD(3, 1, 112);
   m_tramp_asm.LD(0, 1, 120);
   m_tramp_asm.MTLR(0);
+
+  // Restore ppcState pointer (clobbered by TrampolineDispatcher)
+  m_tramp_asm.LD(REG_PPC_BASE, 1, 48);
+
   m_tramp_asm.ADDI(REG_SCRATCH, 1, 128);
   m_tramp_asm.MR(1, REG_SCRATCH);
 
-  // Branch back to the instruction after the fast path
-  m_tramp_asm.BRel(fast_end);
+  // Reload the result from ppcState: TrampolineDispatcher wrote
+  // state->gpr[rd] (integer) or state->ps[rd] (FPU), but the
+  // register restore above would have clobbered data_reg with the
+  // pre-fault value.  Reading from ppcState after the restore
+  // correctly recovers the loaded value.
+  if (is_load)
+  {
+    if (is_fpr)
+    {
+      m_tramp_asm.LFD(0, REG_PPC_BASE,
+                       static_cast<s32>(PS_OFFSET + rd * 16));
+    }
+    else
+    {
+      // Integer load: use r0 (REG_SCRATCH = data_reg) for the result.
+      // MOVI64 below uses r11 (REG_SCRATCH2), NOT r0, so the loaded
+      // value in r0 survives to the fast_end continuation code.
+      m_tramp_asm.LWZ(REG_SCRATCH, REG_PPC_BASE,
+                       static_cast<s32>(GPR_OFFSET + rd * 4));
+    }
+  }
+
+  // Branch back to the instruction after the fast path.
+  // Use r11 (REG_SCRATCH2) for the target address — r0 (REG_SCRATCH)
+  // holds the loaded value for integer loads and must survive.
+  TrampMOVI64(m_tramp_asm, REG_SCRATCH2,
+              reinterpret_cast<u64>(fast_end));
+  m_tramp_asm.MTCTR(REG_SCRATCH2);
+  m_tramp_asm.BCTR();
 
   // 3. Record the mapping
   u32 tramp_size = static_cast<u32>(m_tramp_asm.Size());

@@ -33,6 +33,14 @@ public:
   void ADDIS(u32 rd, u32 ra, s32 sim) { Write32(D(15, rd, ra, sim)); }
   void ADDI(u32 rd, u32 ra, s32 sim) { Write32(D(14, rd, ra, sim)); }
   void LI(u32 rd, s32 sim) { ADDI(rd, 0, sim); }
+  // Load 32-bit zero-extended value into rd using ORIS/ORI (no sign extension).
+  // Always 2 instructions, works for all 32-bit values even when ADDI/LIS would
+  // sign-extend (e.g. 0xFF00 becomes 0xFFFFFFFFFF00 with ADDI on PPC64).
+  void LI32(u32 rd, u32 value)
+  {
+    ORIS(rd, 0, static_cast<u32>(value >> 16));
+    ORI(rd, rd, value & 0xFFFF);
+  }
   void SUBF(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 40, rc)); }
   void SUBFC(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 8, rc)); }
   void SUBFE(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 136, rc)); }
@@ -136,7 +144,8 @@ public:
   void STBUX(u32 rs, u32 ra, u32 rb) { Write32(X(31, rs, ra, rb, 247, false)); }
 
   void NOP() { Write32(0x60000000); }
-  void BLR() { Write32((19u << 26) | (16u << 1)); }
+  // blr = bclr 20, 0: BO=20 (always branch), BI=0 (unused), xo=16, LK=0
+  void BLR() { Write32((19u << 26) | (20u << 21) | (16u << 1)); }
   void MFLR(u32 rd) { MFSPR(rd, 8); }
   void MTLR(u32 rs) { MTSPR(8, rs); }
 
@@ -289,10 +298,19 @@ public:
   void CLR32(u32 rd, u32 rs) { RLDICL(rd, rs, 0, 32); }
 
   // -- Branch / SPR moves --
-  void MTCTR(u32 rs) { Write32(X(31, 0, 0, rs, 467, false)); }
-  void MFCTR(u32 rd) { Write32(X(31, rd, 0, 0, 339, false)); }
-  void BCTRL() { Write32((19u << 26) | (528u << 1) | 1u); }
-  void BCTR()  { Write32((19u << 26) | (528u << 1)); }
+  // mtspr 9, rs  — move to CTR (SPR=9)
+  void MTCTR(u32 rs)
+  {
+    Write32((31u << 26) | ((rs & 0x1F) << 21) | (9u << 16) | (467u << 1));
+  }
+  // mfspr rd, 9 — move from CTR (SPR=9)
+  void MFCTR(u32 rd)
+  {
+    Write32((31u << 26) | ((rd & 0x1F) << 21) | (9u << 16) | (339u << 1));
+  }
+  // bctrl / bctr: bcctr with BO=20 (always branch), BI=0, xo=528, LK=1/0
+  void BCTRL() { Write32((19u << 26) | (20u << 21) | (528u << 1) | 1u); }
+  void BCTR()  { Write32((19u << 26) | (20u << 21) | (528u << 1)); }
 
   // -- Move Register (OR rS, rS, rT → rA = rS) --
   void MR(u32 ra, u32 rs) { OR(ra, rs, rs); }

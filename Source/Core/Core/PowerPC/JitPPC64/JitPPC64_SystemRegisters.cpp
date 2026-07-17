@@ -69,22 +69,13 @@ bool JitPPC64::CompileMFTB(UGeckoInstruction inst)
   u32 spr = (inst.SPRU << 5) | (inst.SPRL & 0x1F);
   if (spr == SPR_TL || spr == SPR_TU)
   {
-    if (spr == SPR_TL)
-    {
-      // Increment TL on read so tight timing loops progress even when the
-      // compiled block never exits to Run() (where CoreTiming normally ticks
-      // the timebase). Each mftb adds 1 cycle, which is enough for the IPL
-      // timing loop to reach its threshold and continue.
-      m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_TL));
-      m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH, 1);
-      m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_TL));
-      StoreGPR(rd, REG_SCRATCH);
-    }
-    else
-    {
-      m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, SPR_OFFSET + 4 * SPR_TU);
-      StoreGPR(rd, REG_SCRATCH);
-    }
+    // Read the SPR value as set by JitPPC64Dispatch from GetFakeTimeBase().
+    // The timebase is refreshed before every block dispatch, so the cached
+    // SPR_OFFSET value is always up-to-date when the block starts.
+    // Within a block that loops (like the IPL timing loop), each iteration
+    // goes through the dispatcher, re-reading the fresh timebase values.
+    m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * spr));
+    StoreGPR(rd, REG_SCRATCH);
     return true;
   }
   return false;

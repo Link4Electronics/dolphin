@@ -876,3 +876,65 @@ With all three encoder bugs fixed + the final LD arg swap fix, the JIT should no
 - Every conditional branch (via XL-form CR logical ops and B-form BC skip patterns)
 - Every CR read/write (via MFCR/MTCRF)
 - Every FPU and AltiVec operation
+
+## Session 2026-07-18: Shared Exit Sequence + Timebase Fix
+
+### Problem: Branch compilers skip epilog
+
+All 4 branch compilers (`CompileB`, `CompileBC`, `CompileBCLR`, `CompileBCCTR`) emitted `m_asm.BLR()` before the epilog ran. The epilog contains r10/r14–r31 restore, frame tear-down, and the return to `Run()`. Every block ending with a branch would:
+- **Leak 256 bytes of stack** (frame never torn down)
+- **Corrupt host r10** (no restore = stale value from CompileBC's not-taken flag)
+- **Corrupt host r14–r31** (RegCache dirty values never written back)
+
+This caused `lwarx r9,0,r10` SIGSEGV (r10 contained garbage) in Luigi's Mansion, and general register corruption after any block with a branch.
+
+### Fix: Shared exit sequence
+
+| File | Change |
+|------|--------|
+| `Jit.h` | Added `m_exit_sequence` member |
+| `Jit.cpp:CompileDispatcher()` | Emitted shared exit codelet at the end of the dispatcher: restore r10, r14–r31 from the block's stack frame; `ADDI(1,1,FRAME_SIZE)` to tear down frame; `LD(LR from 1,16)` / `MTLR` / `BLR` to return to `Run()`. |
+| `Jit.cpp:EmitEpilog()` | Replaced inline restore + `BLR` with `m_asm.BRel(m_exit_sequence)` |
+| `JitPPC64_Branch.cpp` | All 4 branch compilers: `gpr.Flush()` at entry; `m_asm.BLR()` → `m_asm.BRel(m_exit_sequence)` |
+
+### Problem: IPL timebase timeout loop never exits
+
+The IPL at `0x81200150` uses a timing loop:
+```
+mftb r5, TBL     ; read timebase low
+mftb r6, TUB     ; read timebase high
+subf r7, r5, r6  ; r7 = TUB - TBL
+cmpli r7, 0x1124 ; unsigned compare
+bgt loop_start   ; loop if TUB - TBL > 0x1124
+```
+The loop exits when the 64-bit timebase value is within 0x1124 of a 32-bit boundary (i.e., right after TBL overflows and TUB increments). On emulated hardware the timebase starts at ~55 bits (based on current date × CPU clock / 12), so the overflow takes ~60 seconds of emulated time.
+
+`CompileMFTB` used a hack: increment TL by 1 on every TBL read. This made TUB - TBL = 0 - TL, which is always > 0x1124 → the branch back was ALWAYS taken → infinite loop.
+
+### Fix: Timebase refresh in JitPPC64Dispatch
+
+| File | Change |
+|------|--------|
+| `JitPPC64_BackPatch.cpp` | `JitPPC64Dispatch()` now calls `GetFakeTimeBase()` and stores to `spr[SPR_TL]` + `spr[SPR_TU]` before every block dispatch |
+| `JitPPC64_SystemRegisters.cpp:CompileMFTB` | Removed the TL increment on read — now does a plain `LWZ` from the cached SPR array |
+| `JitPPC64_Tables.cpp` | `CanCompileInstruction` re-enables XO=371 (mftb) — was temporarily disabled during debugging |
+
+The timebase advances by ~1 tick per block iteration (14 instructions / 12 timer ratio), so the TBL overflow condition is reached after ~2 billion iterations = ~60 seconds of emulated speed. On the G5 at JIT speed, this takes about 1–2 minutes of wall time.
+
+### Stack Frame Layout (for exit sequence correctness)
+
+```
+[Run()'s SP + 16]  = LR saved by Run()'s BL to m_enter_code
+[enter_code SP]    = Run()'s SP - 32
+[enter_code + 16]  = LR saved by block prolog (MFLR + STD before STDU)
+[enter_code + 24]  = r10 saved by enter_code
+[block SP]         = enter_code SP - 256 (Run's SP - 288)
+[block + 32..176]  = r14..r31 saved by block prolog (CALLEE_SAVE_BASE=32, 18 × 8)
+[block + 176]      = r10 saved by block prolog
+```
+
+The shared exit sequence:
+1. `LD r10 from block+176`, `LD r14..r31 from block+32..168` (block SP)
+2. `ADDI(1,1,256)` → SP = enter_code SP
+3. `LD REG_SCRATCH from SP+16` = LR saved by prolog
+4. `MTLR`, `BLR` → returns to `Run()`

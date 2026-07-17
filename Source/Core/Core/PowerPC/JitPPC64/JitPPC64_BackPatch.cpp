@@ -5,10 +5,11 @@
 #include <vector>
 
 #include "Common/CommonTypes.h"
+#include "Core/PowerPC/PowerPC.h"
 #include "Common/Logging/Log.h"
+#include "Core/HW/SystemTimers.h"
 #include "Core/HW/MMIO.h"
 #include "Core/HW/Memmap.h"
-#include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 
 // ===========================================================================
@@ -136,6 +137,16 @@ extern "C" const u8* JitPPC64Dispatch(u32 pc)
   auto* jit = g_jit_ppc64_instance;
   if (!jit)
     return nullptr;
+
+  // Update the emulated timebase from CoreTiming before each block dispatch.
+  // This ensures CompileMFTB's cached SPR reads return fresh values, and that
+  // the timebase advances between loop iterations (even within the same slice,
+  // because downcount decreases between dispatches).
+  {
+    const u64 tb = jit->m_system.GetSystemTimers().GetFakeTimeBase();
+    TL(jit->m_ppc_state) = static_cast<u32>(tb);
+    TU(jit->m_ppc_state) = static_cast<u32>(tb >> 32);
+  }
 
   JitBlock* block =
       jit->GetBlockCache()->GetBlockFromStartAddress(pc, jit->m_ppc_state.feature_flags);

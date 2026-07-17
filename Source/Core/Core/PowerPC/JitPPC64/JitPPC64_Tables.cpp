@@ -53,7 +53,10 @@ bool CanCompileInstruction(UGeckoInstruction inst)
     case 232: case 234:
       return true;
 
-    // mftb / mfspr (timebase + privileged SPRs)
+    // mftb — compiled via CompileMFTB. The timebase SPRs are refreshed by
+    // JitPPC64Dispatch() before every block dispatch (reads CoreTiming's
+    // GetFakeTimeBase() and writes to ppcState.spr[SPR_TL/SPR_TU]), so the
+    // cached SPR load in CompileMFTB returns the correct emulated value.
     case 371:
       return true;
 
@@ -85,12 +88,21 @@ bool CanCompileInstruction(UGeckoInstruction inst)
     }
   }
 
-  // Integer D-form loads/stores + FPU D-form — DISABLED on PPC64 because
-  // the signal handler infrastructure (SIGSEGV → HandleFault) requires
-  // mcontext_t to be compatible with struct sigcontext, which isn't the
-  // case on glibc PPC64.  These fall through to the interpreter, which
-  // correctly handles MMIO accesses via Memory::Read/Write.
-  // TODO: re-enable when HandleFault works on PPC64.
+  // Integer D-form loads/stores + FPU D-form — Now enabled. The backpatch
+  // system (SIGSEGV → EmitBackpatchRoutine → TrampolineDispatcher → HandleFault)
+  // handles MMIO accesses correctly.  Before enabling, ensure that:
+  //   (a) mcontext_t on the host provides the same register fields as
+  //       pt_regs (verified: regs->nip, regs->gpr[] all work),
+  //   (b) the trampoline is in the same RWX region as the block code so
+  //       HandleFault can patch the fast path with a b-trampoline.
+  case 32: case 33: case 34: case 35:
+  case 36: case 37: case 38: case 39:
+  case 40: case 41: case 42: case 43:
+  case 44: case 45:
+  case 46: case 47:  // lmw/stmw
+  case 48: case 49: case 50: case 51:
+  case 52: case 53: case 54: case 55:
+    return true;
 
   case 18:  // b
     return true;

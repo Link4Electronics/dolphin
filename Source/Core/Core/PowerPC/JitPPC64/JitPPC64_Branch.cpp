@@ -7,24 +7,26 @@
 
 bool JitPPC64::CompileB(UGeckoInstruction inst)
 {
+  gpr.Flush();  // flush dirty guest GPRs before exit
   s32 li = static_cast<s32>(inst.LI << 8) >> 6;
   u32 target = inst.AA ? static_cast<u32>(li) : js.compilerPC + li;
 
   if (inst.LK)
   {
     u32 lr_value = js.compilerPC + 4;
-    m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(lr_value));
+    m_asm.LI32(REG_SCRATCH, lr_value);
     m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * 8));
   }
 
-  m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(target));
+  m_asm.LI32(REG_SCRATCH, target);
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
-  m_asm.BLR();
+  m_asm.BRel(m_exit_sequence);
   return true;
 }
 
 bool JitPPC64::CompileBC(UGeckoInstruction inst)
 {
+  gpr.Flush();  // flush dirty guest GPRs before exit
   const u32 bo = inst.BO;
   const u32 bi = inst.BI;
   const s32 bd = static_cast<s32>(inst.BD << 16) >> 14;
@@ -32,25 +34,25 @@ bool JitPPC64::CompileBC(UGeckoInstruction inst)
   const u32 next_pc = js.compilerPC + 4;
 
   // Dolphin BitField<21,5> extracts BO bits in reverse order from PPC ISA:
-  //   bo[4]=PPC BO[0] (CTR decrement flag)
+  //   bo[4]=PPC BO[0] (CTR decrement flag: 0=decrement, 1=skip)
   //   bo[3]=PPC BO[1] (CTR condition: 0=!=0, 1===0)
-  //   bo[2]=PPC BO[2] (CR check flag)
-  //   bo[1]=PPC BO[3] (CR condition)
+  //   bo[2]=PPC BO[2] (CR check flag: 0=skip, 1=do check)
+  //   bo[1]=PPC BO[3] (CR condition: 0=CR[BI]==0, 1=CR[BI]==1)
   //   bo[0]=PPC BO[4] (reserved)
   const bool true_false = (bo >> 1) & 1;         // PPC BO[3]
-  const bool skip_cr_check = (bo >> 2) & 1;       // PPC BO[2]
+  const bool do_cr_check = (bo >> 2) & 1;         // PPC BO[2]
   const bool skip_ctr_check = (bo >> 4) & 1;      // PPC BO[0]
 
-  if (skip_cr_check && skip_ctr_check)
+  if (!do_cr_check && skip_ctr_check)
   {
     if (inst.LK)
     {
-      m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(next_pc));
+m_asm.LI32(REG_SCRATCH, next_pc);
       m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * 8));
     }
-    m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(target));
-    m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
-    m_asm.BLR();
+    m_asm.LI32(REG_SCRATCH, target);
+      m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
+    m_asm.BRel(m_exit_sequence);
     return true;
   }
 
@@ -72,7 +74,7 @@ bool JitPPC64::CompileBC(UGeckoInstruction inst)
     m_asm.ADDI(10, 0, 1);
   }
 
-  if (!skip_cr_check)
+  if (do_cr_check)
   {
     m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(CR_OFFSET));
     m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH, bi, 31, 31);
@@ -87,17 +89,17 @@ bool JitPPC64::CompileBC(UGeckoInstruction inst)
 
   if (inst.LK)
   {
-    m_asm.ADDI(REG_SCRATCH2, 0, static_cast<s32>(next_pc));
-    m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * 8));
-  }
+      m_asm.LI32(REG_SCRATCH2, next_pc);
+      m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * 8));
+    }
 
-  m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(next_pc));
-  m_asm.CMPWI(0, 10, 0);
-  m_asm.BC(8, 2, 8);         // BO=8:  branch if eq=0 (r10!=0 → not-taken → keep next_pc)
-  m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(target));
+    m_asm.LI32(REG_SCRATCH, next_pc);
+    m_asm.CMPWI(0, 10, 0);
+    m_asm.BC(8, 2, 8);         // BO=8:  branch if eq=0 (r10!=0 → not-taken → keep next_pc)
+    m_asm.LI32(REG_SCRATCH, target);
 
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
-  m_asm.BLR();
+  m_asm.BRel(m_exit_sequence);
   return true;
 }
 
@@ -157,25 +159,26 @@ bool JitPPC64::CompileCRLogical(UGeckoInstruction inst)
 
 bool JitPPC64::CompileBCLR(UGeckoInstruction inst)
 {
+  gpr.Flush();  // flush dirty guest GPRs before exit
   u32 bo = inst.BO;
   u32 bi = inst.BI;
   u32 next_pc = js.compilerPC + 4;
 
   const bool true_false = (bo >> 1) & 1;         // PPC BO[3]
-  const bool skip_cr_check = (bo >> 2) & 1;       // PPC BO[2]
+  const bool do_cr_check = (bo >> 2) & 1;         // PPC BO[2]
   const bool skip_ctr_check = (bo >> 4) & 1;      // PPC BO[0]
 
-  if (skip_cr_check && skip_ctr_check)
+  if (!do_cr_check && skip_ctr_check)
   {
     if (inst.LK)
     {
-      m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(next_pc));
+      m_asm.LI32(REG_SCRATCH, next_pc);
       m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * 8));
     }
     m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * 8));
     m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 29);
     m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
-    m_asm.BLR();
+    m_asm.BRel(m_exit_sequence);
     return true;
   }
 
@@ -195,7 +198,7 @@ bool JitPPC64::CompileBCLR(UGeckoInstruction inst)
     m_asm.ADDI(10, 0, 1);
   }
 
-  if (!skip_cr_check)
+  if (do_cr_check)
   {
     m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(CR_OFFSET));
     m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH, bi, 31, 31);
@@ -209,18 +212,18 @@ bool JitPPC64::CompileBCLR(UGeckoInstruction inst)
 
   if (inst.LK)
   {
-    m_asm.ADDI(REG_SCRATCH2, 0, static_cast<s32>(next_pc));
+    m_asm.LI32(REG_SCRATCH2, next_pc);
     m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * 8));
   }
 
-  m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(next_pc));
+  m_asm.LI32(REG_SCRATCH, next_pc);
   m_asm.CMPWI(0, 10, 0);
   m_asm.BC(8, 2, 8);         // BO=8:  branch if eq=0 (r10!=0 → not-taken → keep next_pc)
   m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * 8));
   m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 29);
 
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
-  m_asm.BLR();
+  m_asm.BRel(m_exit_sequence);
   return true;
 }
 
@@ -230,24 +233,25 @@ bool JitPPC64::CompileBCLR(UGeckoInstruction inst)
 
 bool JitPPC64::CompileBCCTR(UGeckoInstruction inst)
 {
+  gpr.Flush();  // flush dirty guest GPRs before exit
   u32 bo = inst.BO;
   u32 bi = inst.BI;
   u32 next_pc = js.compilerPC + 4;
 
   const bool true_false = (bo >> 1) & 1;         // PPC BO[3]
-  const bool skip_cr_check = (bo >> 2) & 1;       // PPC BO[2]
+  const bool do_cr_check = (bo >> 2) & 1;         // PPC BO[2]
 
-  if (skip_cr_check)
+  if (!do_cr_check)
   {
     if (inst.LK)
     {
-      m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(next_pc));
+      m_asm.LI32(REG_SCRATCH, next_pc);
       m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * 8));
     }
     m_asm.MFSPR(REG_SCRATCH, 9);
     m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 29);
     m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
-    m_asm.BLR();
+    m_asm.BRel(m_exit_sequence);
     return true;
   }
 
@@ -264,17 +268,17 @@ bool JitPPC64::CompileBCCTR(UGeckoInstruction inst)
 
   if (inst.LK)
   {
-    m_asm.ADDI(REG_SCRATCH2, 0, static_cast<s32>(next_pc));
+    m_asm.LI32(REG_SCRATCH2, next_pc);
     m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * 8));
   }
 
-  m_asm.ADDI(REG_SCRATCH, 0, static_cast<s32>(next_pc));
+  m_asm.LI32(REG_SCRATCH, next_pc);
   m_asm.CMPWI(0, 10, 0);
   m_asm.BC(8, 2, 8);         // BO=8:  branch if eq=0 (r10!=0 → not-taken → keep next_pc)
   m_asm.MFSPR(REG_SCRATCH, 9);
   m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 29);
 
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
-  m_asm.BLR();
+  m_asm.BRel(m_exit_sequence);
   return true;
 }
