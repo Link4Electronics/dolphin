@@ -159,12 +159,14 @@ static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
   u32 fault_instr = 0;
   if (ctx->CTX_NIP)
     fault_instr = *reinterpret_cast<const u32*>(ctx->CTX_NIP);
-  fprintf(stderr, "JITPROBE: SIGSEGV addr=0x%lx nip=0x%lx(%+ld) r12=0x%lx instr=0x%08X\n",
-          (unsigned long)info->si_addr,
-          (unsigned long)ctx->CTX_NIP,
-          (long)(ctx->CTX_NIP - (unsigned long)(s_code_region ? s_code_region : (u8*)0)),
-          (unsigned long)ctx->regs->gpr[12],
-          fault_instr);
+  fprintf(stderr,
+          "JITPROBE: SIGSEGV addr=0x%lx nip=0x%lx(%+ld) r11=0x%lx r12=0x%lx "
+          "r3=0x%lx instr=0x%08X\n",
+          (unsigned long)info->si_addr, (unsigned long)ctx->CTX_NIP,
+          (long)(ctx->CTX_NIP -
+                 (unsigned long)(s_code_region ? s_code_region : (u8*)0)),
+          (unsigned long)ctx->CTX_GPR(11), (unsigned long)ctx->CTX_GPR(12),
+          (unsigned long)ctx->CTX_GPR(3), fault_instr);
 
   uintptr_t access_addr = reinterpret_cast<uintptr_t>(info->si_addr);
 

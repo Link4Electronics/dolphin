@@ -87,6 +87,12 @@ extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
   // which is the canonical address used by MMIO dispatch and GetSpanForAddress.
   const u32 phys_ea = ea & 0x3FFFFFFF;
 
+  fprintf(stderr,
+          "JITPROBE: TrampolineDispatcher ea=0x%08X phys_ea=0x%08X "
+          "is_store=%u size=%u rd=%u ra=%u val=0x%lx\n",
+          ea, phys_ea, is_store, access_size, rd, ra,
+          (unsigned long)store_value);
+
   // Check for EFB/MMIO access (physical range 0x08000000-0x0FFFFFFF).
   // The interpreter uses the same check in WriteToHardware / ReadFromHardware.
   if ((phys_ea & 0xF8000000) == 0x08000000)

@@ -134,8 +134,10 @@ typedef mcontext_t SContext;
 #define CTX_SP sp
 #define CTX_PC pc
 #elif defined(_M_PPC_64)
-// PPC64: pt_regs.nip via struct sigcontext.regs pointer
-#define CTX_NIP regs->nip
+// PPC64: use pt_regs pointer via struct sigcontext (works on both musl
+// and modern glibc which also provides regs/nip in the signal context).
+#define CTX_NIP    regs->nip
+#define CTX_GPR(n) regs->gpr[n]
 #else
 #error No context definition for architecture
 #endif
