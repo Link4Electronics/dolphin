@@ -183,7 +183,16 @@ static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
   uintptr_t access_addr = reinterpret_cast<uintptr_t>(info->si_addr);
 
   if (g_jit_ppc64_instance && g_jit_ppc64_instance->HandleFault(access_addr, ctx))
+  {
+    fprintf(stderr, "JITPROBE: SIGSEGV HANDLED addr=0x%lx nip=0x%lx\n",
+            (unsigned long)info->si_addr,
+            (unsigned long)ctx->CTX_NIP);
     return;
+  }
+
+  fprintf(stderr, "JITPROBE: SIGSEGV UNHANDLED addr=0x%lx nip=0x%lx — re-raising\n",
+          (unsigned long)info->si_addr,
+          (unsigned long)ctx->CTX_NIP);
 
   // Not a JIT MMIO fault — restore default handler and re-raise so the
   // process crashes with a proper core dump / debugger notification.
@@ -778,7 +787,11 @@ void JitPPC64::Run()
       // falls through to the dispatcher.  The dispatcher chains blocks
       // internally (via JitPPC64Dispatch + block linking) until
       // downcount ≤ 0, then returns to Run().
+      fprintf(stderr, "JITPROBE: Run() calling enter_code at pc=0x%08X downcount=%d\n",
+              m_ppc_state.pc, m_ppc_state.downcount);
       reinterpret_cast<void (*)()>(m_enter_code)();
+      fprintf(stderr, "JITPROBE: Run() returned from enter_code at pc=0x%08X downcount=%d\n",
+              m_ppc_state.pc, m_ppc_state.downcount);
     }
   }
 }

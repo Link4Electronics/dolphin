@@ -212,9 +212,15 @@ bool JitPPC64::HandleFault(uintptr_t access_address, SContext* ctx)
                    fmt::ptr(area.fast_access_code), fmt::ptr(area.slow_access_code));
 
       m_fault_to_handler.erase(it);
+      fprintf(stderr, "JITPROBE: HandleFault success — patched fast path at %p, tramp at %p, %u entries remain\n",
+              (void*)area.fast_access_code, (void*)area.slow_access_code,
+              (unsigned)m_fault_to_handler.size());
       return true;
     }
   }
+
+  fprintf(stderr, "JITPROBE: HandleFault FAILURE — no matching fast path for fault PC %p (%u entries in map)\n",
+          (void*)fault_pc, (unsigned)m_fault_to_handler.size());
 
   // ---- Fallback: old backpatch table ----
   auto bp_it = std::find_if(s_backpatch_entries.begin(), s_backpatch_entries.end(),
@@ -223,7 +229,10 @@ bool JitPPC64::HandleFault(uintptr_t access_address, SContext* ctx)
                             });
 
   if (bp_it == s_backpatch_entries.end())
+  {
+    fprintf(stderr, "JITPROBE: HandleFault FAILURE — no legacy backpatch entry either, returning false\n");
     return false;
+  }
 
   // Advance NIP past the faulting instruction so it re-faults next time.
   ctx->CTX_NIP += 4;
