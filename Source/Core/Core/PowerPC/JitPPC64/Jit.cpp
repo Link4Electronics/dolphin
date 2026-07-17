@@ -45,6 +45,9 @@ static struct sigaction s_old_sigsegv;
 // ppcState address stored in a global so enter_code can load r12 before first dispatch
 static u64 s_ppc_state_addr = 0;
 
+// code_region address for signal handler debug output
+static const u8* s_code_region = nullptr;
+
 static void InitOffsets(const PowerPC::PowerPCState& state)
 {
   const auto base = reinterpret_cast<const char*>(&state);
@@ -163,11 +166,19 @@ JitPPC64::~JitPPC64() { Shutdown(); }
 
 static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
 {
-  fprintf(stderr, "JITPROBE: SIGSEGV at addr=0x%lx\n",
-          (unsigned long)info->si_addr);
-
   auto* uc = static_cast<ucontext_t*>(ucontext_arg);
   auto* ctx = &uc->uc_mcontext;
+
+  // Dump registers and instruction at fault
+  u32 fault_instr = 0;
+  if (ctx->CTX_NIP)
+    fault_instr = *reinterpret_cast<const u32*>(ctx->CTX_NIP);
+  fprintf(stderr, "JITPROBE: SIGSEGV addr=0x%lx nip=0x%lx(%+ld) r12=0x%lx instr=0x%08X\n",
+          (unsigned long)info->si_addr,
+          (unsigned long)ctx->CTX_NIP,
+          (long)(ctx->CTX_NIP - (unsigned long)(s_code_region ? s_code_region : (u8*)0)),
+          (unsigned long)ctx->regs->gpr[12],
+          fault_instr);
 
   uintptr_t access_addr = reinterpret_cast<uintptr_t>(info->si_addr);
 
@@ -211,11 +222,13 @@ void JitPPC64::Init()
   jo.fastmem_arena = false;
   jo.optimizeGatherPipe = false;
 
+  s_code_region = m_code_region;
   s_ppc_state_addr = reinterpret_cast<u64>(&m_ppc_state);
   InitBackpatch();
   CompileDispatcher();
 
-  NOTICE_LOG_FMT(POWERPC, "JITPPC64: initialized (code={}, tramp={}, combined={})",
+  NOTICE_LOG_FMT(POWERPC, "JITPPC64: initialized ppcState={} (code={}, tramp={}, combined={})",
+                 fmt::ptr(&m_ppc_state),
                  fmt::ptr(m_code_region), fmt::ptr(m_tramp_region), COMBINED_SIZE);
 
   // Install SIGSEGV handler for MMIO backpatching
@@ -670,8 +683,12 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
   m_block_cache.FinalizeBlock(*b, jo.enableBlocklink, code_block, m_code_buffer);
   m_code_pos = block_end;
 
-  fprintf(stderr, "JITPROBE: compiled block at 0x%08X, %u instrs, size=%zu bytes, next=0x%08X\n",
-          em_address, code_block.m_num_instructions, m_asm.Size(), nextPC);
+  fprintf(stderr, "JITPROBE: compiled block at 0x%08X, %u instrs, size=%zu bytes (code_pos=0x%lx, block_start=0x%lx, block_end=0x%lx), next=0x%08X\n",
+          em_address, code_block.m_num_instructions, m_asm.Size(),
+          (unsigned long)m_code_pos,
+          (unsigned long)block_start,
+          (unsigned long)block_end,
+          nextPC);
   for (u32 i = 0; i < code_block.m_num_instructions; ++i)
   {
     if (!m_code_buffer[i].skip)
