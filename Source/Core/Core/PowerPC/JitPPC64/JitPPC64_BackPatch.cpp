@@ -296,9 +296,15 @@ extern "C" const u8* JitPPC64Dispatch(u32 pc)
       jit->GetBlockCache()->GetBlockFromStartAddress(pc, jit->m_ppc_state.feature_flags);
   if (!block)
   {
-    jit->Jit(pc);
-    block =
-        jit->GetBlockCache()->GetBlockFromStartAddress(pc, jit->m_ppc_state.feature_flags);
+    // Skip if this PC already failed — avoids log spam from tight retry loops.
+    if (jit->m_failed_pcs.count(pc) == 0)
+    {
+      jit->Jit(pc);
+      block =
+          jit->GetBlockCache()->GetBlockFromStartAddress(pc, jit->m_ppc_state.feature_flags);
+      if (!block)
+        jit->m_failed_pcs.insert(pc);
+    }
   }
   if (block)
   {

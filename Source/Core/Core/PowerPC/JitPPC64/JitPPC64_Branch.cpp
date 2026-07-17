@@ -182,6 +182,7 @@ bool JitPPC64::CompileBCLR(UGeckoInstruction inst)
     return true;
   }
 
+  // r10 = not-taken flag (0 = taken, non-zero = not-taken)
   m_asm.ADDI(10, 0, 0);
 
   if (!skip_ctr_check)
@@ -266,10 +267,11 @@ bool JitPPC64::CompileBCCTR(UGeckoInstruction inst)
     m_asm.BC(10, 2, 8);    // BO=10: branch if eq=1 (CR[BI]==0 → skip r10=1)
   m_asm.ADDI(10, 0, 1);
 
+  // Unconditional branch to CTR (no CR or CTR check)
   if (inst.LK)
   {
-    m_asm.LI32(REG_SCRATCH2, next_pc);
-    m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * 8));
+    m_asm.LI32(REG_SCRATCH, next_pc);
+    m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * 8));
   }
 
   m_asm.LI32(REG_SCRATCH, next_pc);
@@ -277,7 +279,6 @@ bool JitPPC64::CompileBCCTR(UGeckoInstruction inst)
   m_asm.BC(8, 2, 8);         // BO=8:  branch if eq=0 (r10!=0 → not-taken → keep next_pc)
   m_asm.MFSPR(REG_SCRATCH, 9);
   m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 29);
-
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
   m_asm.BRel(m_exit_sequence);
   return true;

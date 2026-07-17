@@ -3,21 +3,23 @@
 
 // ===========================================================================
 // System register compilers
+//
+// All GPR access uses regcache (gpr.R/gpr.W) to stay consistent with
+// cached values from the integer/load-store compilers.
 // ===========================================================================
 
 bool JitPPC64::CompileMFCR(UGeckoInstruction inst)
 {
   u32 rd = inst.RD;
   m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(CR_OFFSET));
-  StoreGPR(rd, REG_SCRATCH);
+  m_asm.MR(gpr.W(rd), REG_SCRATCH);
   return true;
 }
 
 bool JitPPC64::CompileMTCRF(UGeckoInstruction inst)
 {
   u32 rd = inst.RD;
-  LoadGPR(REG_SCRATCH, rd);
-  m_asm.MTCRF(inst.CRM, REG_SCRATCH);
+  m_asm.MTCRF(inst.CRM, gpr.R(rd));
   return true;
 }
 
@@ -28,7 +30,7 @@ bool JitPPC64::CompileMFSPR(UGeckoInstruction inst)
   if (spr < 1024)
   {
     m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * spr));
-    StoreGPR(rd, REG_SCRATCH);
+    m_asm.MR(gpr.W(rd), REG_SCRATCH);
     return true;
   }
   return false;
@@ -40,8 +42,7 @@ bool JitPPC64::CompileMTSPR(UGeckoInstruction inst)
   u32 spr = (inst.SPRU << 5) | (inst.SPRL & 0x1F);
   if (spr < 1024)
   {
-    LoadGPR(REG_SCRATCH, rd);
-    m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * spr));
+    m_asm.STW(gpr.R(rd), REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * spr));
     return true;
   }
   return false;
@@ -51,15 +52,14 @@ bool JitPPC64::CompileMFMSR(UGeckoInstruction inst)
 {
   u32 rd = inst.RD;
   m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(MSR_OFFSET));
-  StoreGPR(rd, REG_SCRATCH);
+  m_asm.MR(gpr.W(rd), REG_SCRATCH);
   return true;
 }
 
 bool JitPPC64::CompileMTMSR(UGeckoInstruction inst)
 {
   u32 rd = inst.RD;
-  LoadGPR(REG_SCRATCH, rd);
-  m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(MSR_OFFSET));
+  m_asm.STW(gpr.R(rd), REG_PPC_BASE, static_cast<s32>(MSR_OFFSET));
   return true;
 }
 
@@ -89,7 +89,7 @@ bool JitPPC64::CompileMFTB(UGeckoInstruction inst)
     else
       m_asm.RLDICL(REG_SCRATCH, 3, 32, 32);  // extract upper 32 bits
 
-    StoreGPR(rd, REG_SCRATCH);
+    m_asm.MR(gpr.W(rd), REG_SCRATCH);
     return true;
   }
   return false;
@@ -113,56 +113,46 @@ bool JitPPC64::CompileMisc(UGeckoInstruction inst)
   {
   case 54:  // dcbst
     if (inst.RA == 0)
-      m_asm.DCBST(0, inst.RB);
+      m_asm.DCBST(0, gpr.R(inst.RB));
     else
     {
-      LoadGPR(REG_SCRATCH, inst.RA);
-      LoadGPR(REG_SCRATCH2, inst.RB);
-      m_asm.ADD(REG_SCRATCH2, REG_SCRATCH, REG_SCRATCH2);
+      m_asm.ADD(REG_SCRATCH2, gpr.R(inst.RA), gpr.R(inst.RB));
       m_asm.DCBST(REG_SCRATCH2, 0);
     }
     return true;
   case 86:  // dcbf
     if (inst.RA == 0)
-      m_asm.DCBF(0, inst.RB);
+      m_asm.DCBF(0, gpr.R(inst.RB));
     else
     {
-      LoadGPR(REG_SCRATCH, inst.RA);
-      LoadGPR(REG_SCRATCH2, inst.RB);
-      m_asm.ADD(REG_SCRATCH2, REG_SCRATCH, REG_SCRATCH2);
+      m_asm.ADD(REG_SCRATCH2, gpr.R(inst.RA), gpr.R(inst.RB));
       m_asm.DCBF(REG_SCRATCH2, 0);
     }
     return true;
   case 246: // dcbtst
     if (inst.RA == 0)
-      m_asm.DCBTST(0, inst.RB);
+      m_asm.DCBTST(0, gpr.R(inst.RB));
     else
     {
-      LoadGPR(REG_SCRATCH, inst.RA);
-      LoadGPR(REG_SCRATCH2, inst.RB);
-      m_asm.ADD(REG_SCRATCH2, REG_SCRATCH, REG_SCRATCH2);
+      m_asm.ADD(REG_SCRATCH2, gpr.R(inst.RA), gpr.R(inst.RB));
       m_asm.DCBTST(REG_SCRATCH2, 0);
     }
     return true;
   case 278: // dcbt
     if (inst.RA == 0)
-      m_asm.DCBT(0, inst.RB);
+      m_asm.DCBT(0, gpr.R(inst.RB));
     else
     {
-      LoadGPR(REG_SCRATCH, inst.RA);
-      LoadGPR(REG_SCRATCH2, inst.RB);
-      m_asm.ADD(REG_SCRATCH2, REG_SCRATCH, REG_SCRATCH2);
+      m_asm.ADD(REG_SCRATCH2, gpr.R(inst.RA), gpr.R(inst.RB));
       m_asm.DCBT(REG_SCRATCH2, 0);
     }
     return true;
   case 470: // dcbi (privileged data cache block invalidate)
     if (inst.RA == 0)
-      m_asm.DCBI(0, inst.RB);
+      m_asm.DCBI(0, gpr.R(inst.RB));
     else
     {
-      LoadGPR(REG_SCRATCH, inst.RA);
-      LoadGPR(REG_SCRATCH2, inst.RB);
-      m_asm.ADD(REG_SCRATCH2, REG_SCRATCH, REG_SCRATCH2);
+      m_asm.ADD(REG_SCRATCH2, gpr.R(inst.RA), gpr.R(inst.RB));
       m_asm.DCBI(REG_SCRATCH2, 0);
     }
     return true;
@@ -174,12 +164,10 @@ bool JitPPC64::CompileMisc(UGeckoInstruction inst)
     return true;
   case 982: // icbi
     if (inst.RA == 0)
-      m_asm.ICBI(0, inst.RB);
+      m_asm.ICBI(0, gpr.R(inst.RB));
     else
     {
-      LoadGPR(REG_SCRATCH, inst.RA);
-      LoadGPR(REG_SCRATCH2, inst.RB);
-      m_asm.ADD(REG_SCRATCH2, REG_SCRATCH, REG_SCRATCH2);
+      m_asm.ADD(REG_SCRATCH2, gpr.R(inst.RA), gpr.R(inst.RB));
       m_asm.ICBI(REG_SCRATCH2, 0);
     }
     return true;
@@ -187,12 +175,10 @@ bool JitPPC64::CompileMisc(UGeckoInstruction inst)
   {
     // EA = (RA ? GPR[RA] : 0) + GPR[RB]
     if (inst.RA == 0)
-      LoadGPR(REG_SCRATCH2, inst.RB);
+      m_asm.MR(REG_SCRATCH2, gpr.R(inst.RB));
     else
     {
-      LoadGPR(REG_SCRATCH, inst.RA);
-      LoadGPR(REG_SCRATCH2, inst.RB);
-      m_asm.ADD(REG_SCRATCH2, REG_SCRATCH, REG_SCRATCH2);
+      m_asm.ADD(REG_SCRATCH2, gpr.R(inst.RA), gpr.R(inst.RB));
     }
     // Align EA to 32 bytes (Gekko cache line)
     m_asm.RLDICR(REG_SCRATCH, REG_SCRATCH2, 0, 58);

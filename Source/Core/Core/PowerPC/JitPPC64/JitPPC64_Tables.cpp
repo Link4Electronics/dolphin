@@ -39,10 +39,13 @@ bool CanCompileInstruction(UGeckoInstruction inst)
     switch (xo)
     {
     // Integer ALU (fully implemented)
+    // Note: mfcr (19) and mtcrf (144) are excluded — ppcState.cr is a
+    // ConditionRegister (internal 64-bit format), not a plain u32, so
+    // LWZ/STW from CR_OFFSET reads/writes garbage.
     case 0:   case 4:   case 8:   case 10:  case 11:
-    case 19:  case 24:  case 26:  case 28:  case 32:
+    case 24:  case 26:  case 28:  case 32:
     case 40:  case 60:  case 75:  case 83:  case 124:
-    case 144: case 146: case 235: case 266: case 284:
+    case 146: case 235: case 266: case 284:
     case 316: case 339: case 412: case 444:
     case 459: case 467: case 476: case 491:
     case 536: case 792: case 824: case 922: case 954:
@@ -106,15 +109,26 @@ bool CanCompileInstruction(UGeckoInstruction inst)
 
   case 18:  // b
     return true;
-  case 16:  // bc
-    return true;
+  case 16:  // bc — only JIT when CR check is skipped (CTR-only or unconditional)
+  {
+    // CR_skip = (BO >> 4) & 1. When cr_skip is set, the branch doesn't check CR.
+    // ppcState.cr is a ConditionRegister (internal 64-bit format), not a plain u32,
+    // so LWZ-based CR reads from JIT code return garbage. We must fall back to
+    // the interpreter for any CR-checking branch.
+    return (inst.BO >> 4) & 1;
+  }
 
   case 19:  // opcd 19
-    return inst.SUBOP10 == 16  ||  // bclr
-           inst.SUBOP10 == 528 ||  // bcctr
-           inst.SUBOP10 == 0   ||  // mcrf
-           inst.SUBOP10 == 150 ||  // isync
-           (inst.SUBOP10 >= 33 && inst.SUBOP10 <= 449);  // CR logical
+  {
+    u32 sub10 = inst.SUBOP10;
+    if (sub10 == 0)   return true;  // mcrf
+    if (sub10 == 150) return true;  // isync
+    if (sub10 >= 33 && sub10 <= 449) return true;  // CR logical
+    // bclr (16) and bcctr (528) — only JIT when CR check is skipped
+    if (sub10 == 16 || sub10 == 528)
+      return (inst.BO >> 4) & 1;
+    return false;
+  }
 
   // FPU (opcd 48-55 handled above)
   case 59:  // FPU single-precision

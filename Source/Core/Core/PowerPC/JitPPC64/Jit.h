@@ -2,6 +2,7 @@
 
 #include <array>
 #include <map>
+#include <unordered_set>
 #include <vector>
 
 #include "Core/PowerPC/JitCommon/JitBase.h"
@@ -86,6 +87,7 @@ public:
 private:
   friend struct JitPPC64RegCache;
   friend class JitPPC64BlockCache;
+  friend const u8* JitPPC64Dispatch(u32);
 
   // Internal Jit() with retry parameter
   void Jit(u32 em_address, bool clear_cache_and_retry_on_failure);
@@ -202,7 +204,7 @@ private:
   void StoreGPR(u32 guest_reg, u32 host_reg);
   void LoadCR(u32 host_reg);
   void StoreCR(u32 host_reg);
-  void EmitCR0Update();
+  void EmitCR0Update(u32 host_reg);
   void EmitCarryFromReg();
 
   void FallBackToInterpreter(UGeckoInstruction inst);
@@ -224,6 +226,9 @@ private:
   // Stores the mapping from fast path range to slow path entry.
   // upper_bound(fault_pc) finds the range, then check pc >= fast_access_code.
   std::map<const u8*, FastmemArea> m_fault_to_handler;
+
+  // PCs that failed JIT compilation — skip retries to avoid log spam.
+  std::unordered_set<u32> m_failed_pcs;
 
   // Per-block JIT state
   u32 m_block_start = 0;

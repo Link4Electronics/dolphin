@@ -40,6 +40,9 @@ struct JitPPC64RegCache
   // Flush all dirty registers back to ppcState
   void Flush();
 
+  // Flush a single dirty register back to ppcState (no-op if not cached or not dirty)
+  void FlushRegister(u32 ppc_reg);
+
   // Mark all entries invalid (block entry)
   void Reset();
 

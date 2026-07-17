@@ -3,21 +3,18 @@
 bool JitPPC64::CompileRLWINM(UGeckoInstruction inst)
 {
   u32 ra = inst.RA, rs = inst.RS;
-  LoadGPR(REG_SCRATCH, rs);
-  m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, inst.SH, inst.MB, inst.ME);
-  if (inst.Rc) EmitCR0Update();
-  StoreGPR(ra, REG_SCRATCH);
+  u32 host_ra = gpr.W(ra);
+  m_asm.RLWINM(host_ra, gpr.R(rs), inst.SH, inst.MB, inst.ME);
+  if (inst.Rc) EmitCR0Update(host_ra);
   return true;
 }
 
 bool JitPPC64::CompileRLWIMI(UGeckoInstruction inst)
 {
   u32 ra = inst.RA, rs = inst.RS;
-  LoadGPR(REG_SCRATCH, ra);
-  LoadGPR(REG_SCRATCH2, rs);
-  m_asm.RLWIMI(REG_SCRATCH, REG_SCRATCH2, inst.SH, inst.MB, inst.ME);
-  if (inst.Rc) EmitCR0Update();
-  StoreGPR(ra, REG_SCRATCH);
+  u32 host_ra = gpr.W(ra);
+  m_asm.RLWIMI(host_ra, gpr.R(rs), inst.SH, inst.MB, inst.ME);
+  if (inst.Rc) EmitCR0Update(host_ra);
   return true;
 }
 
@@ -25,10 +22,8 @@ bool JitPPC64::CompileRLWNM(UGeckoInstruction inst)
 {
   u32 ra = inst.RA, rs = inst.RS;
   u32 rb = inst.RB;
-  LoadGPR(REG_SCRATCH, rs);
-  LoadGPR(REG_SCRATCH2, rb);
-  m_asm.RLWNM(REG_SCRATCH, REG_SCRATCH, REG_SCRATCH2, inst.MB, inst.ME);
-  if (inst.Rc) EmitCR0Update();
-  StoreGPR(ra, REG_SCRATCH);
+  u32 host_ra = gpr.W(ra);
+  m_asm.RLWNM(host_ra, gpr.R(rs), gpr.R(rb), inst.MB, inst.ME);
+  if (inst.Rc) EmitCR0Update(host_ra);
   return true;
 }

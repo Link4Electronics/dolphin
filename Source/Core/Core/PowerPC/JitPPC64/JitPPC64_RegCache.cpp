@@ -52,6 +52,21 @@ void JitPPC64RegCache::Flush()
   }
 }
 
+void JitPPC64RegCache::FlushRegister(u32 ppc_reg)
+{
+  for (u32 i = 0; i < NUM_CACHED_REGS; ++i)
+  {
+    if (m_entries[i].ppc_reg == ppc_reg && m_entries[i].dirty)
+    {
+      u32 host_reg = FIRST_CACHED_REG + i;
+      m_asm->STW(host_reg, m_ppc_base,
+                 static_cast<s32>(GPR_OFFSET + 4 * ppc_reg));
+      m_entries[i].dirty = false;
+      return;
+    }
+  }
+}
+
 void JitPPC64RegCache::Reset()
 {
   for (auto& e : m_entries)

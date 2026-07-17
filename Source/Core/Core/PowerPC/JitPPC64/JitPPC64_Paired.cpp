@@ -301,34 +301,23 @@ bool JitPPC64::CompilePairedLoadStore(UGeckoInstruction inst)
   u32 w = indexed ? inst.Wx : inst.W;
   u32 fr = inst.RD;
 
-  // ---- EA computation ----
+  // ---- EA computation (regcache) ----
   if (indexed)
   {
     // X-form: EA = (RA ? GPR[RA] : 0) + GPR[RB]
     if (inst.RA == 0)
-    {
-      LoadGPR(REG_SCRATCH2, inst.RB);
-    }
+      m_asm.MR(REG_SCRATCH2, gpr.R(inst.RB));
     else
-    {
-      LoadGPR(REG_SCRATCH, inst.RA);
-      LoadGPR(REG_SCRATCH2, inst.RB);
-      m_asm.ADD(REG_SCRATCH2, REG_SCRATCH, REG_SCRATCH2);
-    }
+      m_asm.ADD(REG_SCRATCH2, gpr.R(inst.RA), gpr.R(inst.RB));
   }
   else
   {
     // D-form: EA = (RA ? GPR[RA] : 0) + SIMM_12
     s32 simm = inst.SIMM_12;
     if (inst.RA == 0)
-    {
       m_asm.ADDI(REG_SCRATCH2, 0, simm);
-    }
     else
-    {
-      LoadGPR(REG_SCRATCH, inst.RA);
-      m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH, simm);
-    }
+      m_asm.ADDI(REG_SCRATCH2, gpr.R(inst.RA), simm);
   }
 
   // ---- QUANTIZE_FLOAT path ----
@@ -376,7 +365,7 @@ bool JitPPC64::CompilePairedLoadStore(UGeckoInstruction inst)
 
   // ---- Update form: GPR[RA] = EA ----
   if (update)
-    StoreGPR(inst.RA, REG_SCRATCH2);
+    m_asm.MR(gpr.W(inst.RA), REG_SCRATCH2);
 
   return true;
 }

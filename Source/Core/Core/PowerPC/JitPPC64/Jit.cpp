@@ -446,15 +446,15 @@ void JitPPC64::StoreGPR(u32 guest_reg, u32 host_reg)
 // Clobbers r0, r11
 // ===========================================================================
 
-void JitPPC64::EmitCR0Update()
+void JitPPC64::EmitCR0Update(u32 host_reg)
 {
-  m_asm.EXTSW(REG_SCRATCH2, REG_SCRATCH);
+  m_asm.EXTSW(REG_SCRATCH2, host_reg);
   m_asm.CMPWI(0, REG_SCRATCH2, 0);
   m_asm.MFCR(REG_SCRATCH2);
   m_asm.LBZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(XER_SO_OV_OFFSET));
   m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 30, 30);
   m_asm.RLWIMI(REG_SCRATCH2, REG_SCRATCH, 27, 3, 3);
-  m_asm.MTCRF(0x80, REG_SCRATCH2);
+  m_asm.MTCRF(0x01, REG_SCRATCH2);  // mask 0x01 = CR field 0
 }
 
 // ===========================================================================
@@ -614,10 +614,10 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
     }
     else
     {
-      // Integer load: use r0 (REG_SCRATCH = data_reg) for the result.
-      // MOVI64 below uses r11 (REG_SCRATCH2), NOT r0, so the loaded
-      // value in r0 survives to the fast_end continuation code.
-      m_tramp_asm.LWZ(REG_SCRATCH, REG_PPC_BASE,
+      // Integer load: reload from ppcState into data_reg.
+      // TrampolineDispatcher wrote the loaded value to state->gpr[rd];
+      // we reload to survive the trampoline's register save/restore.
+      m_tramp_asm.LWZ(data_reg, REG_PPC_BASE,
                        static_cast<s32>(GPR_OFFSET + rd * 4));
     }
   }
@@ -764,11 +764,22 @@ void JitPPC64::Run()
       if (!m_block_cache.GetBlockFromStartAddress(m_ppc_state.pc,
                                                     m_ppc_state.feature_flags))
       {
-        Jit(m_ppc_state.pc);
-        if (!m_block_cache.GetBlockFromStartAddress(m_ppc_state.pc,
-                                                      m_ppc_state.feature_flags))
+        if (m_failed_pcs.count(m_ppc_state.pc) == 0)
         {
-          // Can't compile — fall back to interpreter
+          Jit(m_ppc_state.pc);
+          if (!m_block_cache.GetBlockFromStartAddress(m_ppc_state.pc,
+                                                        m_ppc_state.feature_flags))
+          {
+            m_failed_pcs.insert(m_ppc_state.pc);
+            // Can't compile — fall back to interpreter
+            m_system.GetInterpreter().SingleStep();
+            m_ppc_state.downcount -= 1;
+            continue;
+          }
+        }
+        else
+        {
+          // Already known to fail — skip Jit() and go straight to interpreter
           m_system.GetInterpreter().SingleStep();
           m_ppc_state.downcount -= 1;
           continue;
