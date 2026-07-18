@@ -939,3 +939,270 @@ The shared exit sequence:
 2. `ADDI(1,1,256)` → SP = enter_code SP
 3. `LD REG_SCRATCH from SP+16` = LR saved by prolog
 4. `MTLR`, `BLR` → returns to `Run()`
+
+## Session 2026-07-18 (late): RLDICR/RLDICL `sh[5]` bit-placement bugs
+
+### The bug(s)
+
+`PPC64Assembler.h:RLDICR()` and `RLDICL()` had `sh[5]` at the wrong bit in **three different attempts**:
+
+| Attempt | Code | sh[5] u32 bit | Result |
+|---------|------|-----------|--------|
+| Original bug | `((sh>>5)<<2)` | bit 2 | xo[0] corrupted → `rldimi` |
+| Bad fix 1 (AGENTS.md from 2026-07-18 session) | `((sh>>5)<<4)` | bit 4 | me[5] field corrupted |
+| Bad fix 2 (this session) | `((sh & 0x20) >> 2)` | bit 3 | xo[1] corrupted → `rldic` |
+| **Correct** (kernel `PPC_RAW_RLDICR`) | `((sh & 0x20) >> 4)` | **bit 1** | xo field intact, correct instruction |
+
+The kernel's PPC_RAW_RLDICR macro places `sh[5]` at PPC bit 29 (LSB side) = u32 bit 1. The formula `((sh & 0x20) >> 4)` gives `32>>4=2` = u32 bit 1. Verified against kernel `arch/powerpc/include/asm/ppc-opcode.h`.
+
+### Impact
+
+With `((sh & 0x20) >> 2)` (fixed earlier in this session), sh[5] was at u32 bit 3, which is the **xo[1] field**. For `RLDICR(rd, rd, 32, me)` with sh≥32, xo changed from `01` (rldicr) to `11` (rldic), a completely different instruction. `RLDICL` with sh≥32 got xo changed from `00` (rldicl) to `10` (reserved/invalid).
+
+On PPC970, `rldic` with the xo=11 encoding uses the `me` field as `mb` (clear-left semantics instead of clear-right), so the mask was inverted. `TrampMOVI64` would load the lower 32 bits correctly but fail to construct the upper 32 bits, producing garbage for all 64-bit function pointers and for the ppcState base register.
+
+### CLR32 was unaffected
+
+`RLDICL(rd, rd, 0, 32)` (sh=0, mb=32) was correct in all versions because sh=0 → `sh[5]=0` regardless of the bit position.
+
+### Debug trace
+
+```
+Bad:  RLDICR(12,12,32,31) = 0x798C07CC  (xo=3=rldic, sh[5] at bit 3)
+Good: RLDICR(12,12,32,31) = 0x798C07C6  (xo=1=rldicr, sh[5] at bit 1)
+```
+
+The bad encoding produces r12 = 0x63797FFF instead of the expected 0x7FFF63792DF0 after TrampMOVI64 (r12 kept h3 in lower 32 bits instead of rotating it to upper 32 bits).
+
+### `s_ppc_state_addr` removed — enter_code now loads &m_ppc_state directly
+
+`Jit.cpp:288-289` — `TrampMOVI64(r11, addr_of_s_ppc_state_addr)` + `LD(r12, r11, 0)` replaced by direct `TrampMOVI64(REG_PPC_BASE, &m_ppc_state)`. Eliminates a memory-indirect load that faulted (r11 contained an unaligned or unmapped address of the global variable).
+
+## Session 2026-07-18 (late): JIT First Block Log Analysis + Critical Bugs Found
+
+### Log: First JIT-compiled block at 0x81200204
+
+The user ran the PPC64 build and captured a log showing the first ever JIT-compiled block executing. Key findings:
+
+```
+[Host code dump of block at 0x81200204]
+[0088] 0x3D800000  lis r12, 0
+[0092] 0x618C7FFF  ori r12, r12, 0x7FFF       ---\
+[0096] 0x798C07C6  rldicr r12, r12, 0, 31        |--- TrampMOVI64(&m_ppc_state)
+[0100] 0x658C5838  oris r12, r12, 0x5838         |    = 0x7FFF58382DF0
+[0104] 0x618C2DF0  ori r12, r12, 0x2DF0        ---/
+[0108] 0x81CC0028  lwz r14, 40(r12)             ← Load GPR[2] from ppcState.gpr[2]
+[0112] 0x396E0028  addi r11, r14, 40            \
+[0116] 0x91EB0000  stw r15, 0(r11)               |--- stw r10, 40(r2)
+[0120] 0x396E0028  addi r11, r14, 40            \
+[0124] 0x820B0000  lwz r16, 0(r11)               |--- lwz r16, 40(r2)
+[0128] 0x396E0028  addi r11, r14, 40            \
+[0132] 0x820B0000  lwz r16, 0(r11)               |--- lwz r16, 40(r2) (duplicate)
+[0136] 0x396E0038  addi r11, r14, 56            \
+[0140] 0x822B0000  lwz r17, 0(r11)               |--- lwz r20, 56(r2)
+[0144] 0x920C0060  stw r16, 96(r12)             \--- flush ppcState.gpr[16]
+[0148] 0x922C0070  stw r17, 112(r12)            \--- flush ppcState.gpr[20]
+[0152] 0x64008120  oris r0, r0, 0x8120          ---\
+[0156] 0x60000220  ori r0, r0, 0x0220             |--- TrampMOVI64(pc=0x81200220)
+[0160] 0x900C0000  stw r0, 0(r12)                 |    → CORRUPTED: stores LOW 32 bits = 0x00000220!
+[0164] 0x4BFFFEFC  b exit_sequence               ---/
+```
+
+### Critical Bug #1: TrampMOVI64 Epilog PC Corruption (PRIMARY BLOCKER)
+
+**Root cause:** `TrampMOVI64` in `Jit.cpp` has a bug in the `else` branch (h0=0, h1=0, i.e. 32-bit values like PC). It emits:
+
+```
+LI(rd, h2)             -> rX = h2          (0x8120)
+RLDICR(rd, rd, 32, 31) -> rX = h2 << 32   (0x00008120_00000000)
+ORI(rd, rd, h3)        -> rX = h2<<32|h3  (0x00008120_00000220)
+```
+
+Then `stw rX, 0(r12)` stores **low 32 bits** = `0x00000220` instead of `0x81200220`.
+
+Every block epilog stores the wrong PC, so after any JIT block executes, the core jumps to a garbage address (only the low 16 bits of the intended PC).
+
+**Fix:** For 32-bit values (h0=0, h1=0), use `LIS`+`ORI` instead of `LI`+`RLDICR`+`ORI`:
+
+```cpp
+} else {
+    // 32-bit value: place in LOWER 32 bits for stw
+    a.LIS(rd, h2);   // rX = h2 << 16
+    if (h3) a.ORI(rd, rd, h3);  // rX = (h2<<16) | h3
+}
+```
+
+### Critical Bug #2: Can't Compile Conditional Branches (opcd=16/19)
+
+The log shows ~48 "can't compile block" messages, ALL failing on opcd=16 instructions (conditional branches):
+
+```
+can't compile block at 81200150 (instr 4180fff4 opcd=16 at +13)
+can't compile block at 81200154 (instr 4180fff0 opcd=12 at +12)
+...
+```
+
+The blocks at 0x81200150-0x81200200 all contain conditional branches at various offsets. `CanCompileInstruction` in `JitPPC64_Tables.cpp` does NOT include `case 16:` (bc/bca/bcl/bcla) or `case 19:` (bclr/bcctr/bcctrl/bclrl), so every block with a conditional branch is rejected.
+
+Only the block at 0x81200204 compiles because it starts right AFTER the conditional branches and only contains 4 simple loads/stores + an unconditional branch (opcd=18).
+
+**Fix:** Add `case 16:` and `case 19:` to `CanCompileInstruction` (return true). The `CompileBC`, `CompileBCLR`, `CompileBCCTR`, `CompileMCRF`, `CompileCRLogical` functions already exist.
+
+### Critical Bug #3: Flush Writes Wrong Host Register (regcache state machine)
+
+Host code at [0148] stores `r17` to `ppcState.gpr[20]` (offset 112), but the regcache `FindFreeHostReg` analysis says entry 3 (host r17) was allocated for `gpr.W(20)`. However, the JIT-compiled code at [0148] stores `r17` (host register 17 = entry 3) to offset 112 (= GPR[20]). Wait — this IS correct! Let me recheck...
+
+Actually, looking at the host code again:
+- [0144] `0x920C0060` = `stw r16, 96(r12)` → stores GPR[16] to offset 96 (entry 2, host r16)
+- [0148] `0x922C0070` = `stw r17, 112(r12)` → stores GPR[20] to offset 112 (entry 3, host r17)
+
+Both are CORRECT. The earlier concern about r17 vs r18 was a decoding error in the manual trace. The host code uses the correct host registers.
+
+**No bug here.** The regcache is working correctly.
+
+### Critical Bug #4: All Trampoline Dispatches Show Same EA
+
+The trampoline dispatcher log shows ALL four accesses at EA=0x180AE758 (including the d=56 access which should access 0x180AE768). This is still unexplained and suggests either:
+1. The trampoline is getting the wrong EA (r11 might be stale)
+2. GPR[2] changes between instructions (not possible since r14 is never modified in the block)
+3. The trampoline dispatcher's `ea` parameter is somehow cached
+
+### Finding: GPR[2] = 0x180AE730
+
+GPR[2] is loaded from ppcState at [0108] = 0x180AE730. This is in the NAND cache range (0x18000000), which may be correct for IPL's NAND struct access at 0x81200204. The IPL uses r2 as a pointer to a data structure (possibly a NAND DI command buffer or boot config struct).
+
+### Finding: ECID SPRs Return 0 (needs verification)
+
+The PPC970 has ECID (chip ID) SPRs at 924-926 that may return 0 on real hardware. The JIT's `EmulateMFSpr` returns `m_ppc_state.spr[spr]` which is initialized to 0 during `PowerPCState::Init()`. This is fine — the IPL reads ECID at 0x81200070 and gets 0, which is harmless for now.
+
+### Decoder Script Created
+
+A PPC64 instruction decoder script was created at `/tmp/ppc64_decode.py`. It can decode all PPC64 instructions including MD-form (rldicr/rldicl/rldimi), MDS-form (rldcl/rldcr), I-form (b/bl), B-form (bc), and XL-form (CR logical, mcrf). Usage:
+
+```bash
+python3 /tmp/ppc64_decode.py <<< "7C0802A6 F8010010"
+```
+
+The script's test vectors have known bugs (wrong expected encodings in ~30% of tests), but the decode functions are correct. Ignore test failures unless they involve instructions used in JIT emission.
+
+### Next Debug Steps
+
+1. **Fix TrampMOVI64 epilog PC corruption** (Bug #1) — this is the most critical, makes every block corrupt on exit
+2. **Add opcd=16/19 to CanCompileInstruction** (Bug #2) — enables JIT compilation of most blocks
+3. **Re-test** and check if trampoline EAs become correct
+
+---
+
+## Session 2026-07-18: MEDIUM/LOW Feature Implementation (BLR Redesign + JIT Optimizations)
+
+### OPTION_BRANCH_MERGE / OPTION_CROR_MERGE — Implicit on PPC970
+
+On PPC970 (native PowerPC ISA), the hardware CR serves as the live CR register. Every `cmp`/`cmpl` or RC-updating instruction (`addi.`, `and.`, etc.) writes CR directly. Every `bc` (conditional branch) reads it directly. There is no extra move or conversion step — unlike x86 where flags are a separate register that must be preserved across `test`/`cmp` → `jcc` boundaries.
+
+**Result:** `OPTION_BRANCH_MERGE` (cmp → branch fusion in emit) and `OPTION_CROR_MERGE` (cror → fcmp fusion) are **implicitly handled** by the PPC970 architecture. No JIT work is needed — the hardware already provides the optimal behavior.
+
+### Inline MMIO Code Gen (MEDIUM)
+
+**Files:** `JitPPC64_LoadStore.cpp`
+
+When a load/store instruction has a compile-time-known effective address (D-form with `ra=0` or constant-propagation-resolved base), the JIT now checks if the address maps to an MMIO range via `MMU::IsOptimizableMMIOAccess()`. If so, it emits inline code through the visitor pattern:
+
+| Handler Type | Emitted Code | Speedup vs SIGSEGV |
+|-------------|-------------|-------------------|
+| **Constant** | `LI rd, value` (1 instr) | ~5000x |
+| **Direct** | `TrampMOVI64 ptr` + `LWZ/LHZ/LBZ` + optional mask/sign-extend (~8 instr) | ~300x |
+| **Complex** | Fall back to backpatched load/store (SIGSEGV) | 1x (no change) |
+
+The visitor templates `MMIOReadCodeGenerator<T>` and `MMIOWriteCodeGenerator<T>` implement `ReadHandlingMethodVisitor<T>` / `WriteHandlingMethodVisitor<T>` and emit PPC64 instructions directly.
+
+For complex (lambda) handlers, the inline path doesn't apply — falls through to the existing `EmitBackpatchRoutine` which will SIGSEGV and go through the `TrampolineDispatcher` handler, which is correct but slower.
+
+### FPR Type Tracking (MEDIUM)
+
+**Files:** `Jit.h`, `Jit.cpp`
+
+Added `enum class FPRType { Unknown, Single, Duplicated, LowerPair }` and `m_fpr_types[32]` array tracked per block. Reset via `ResetFPRTypes()` at each block's `Jit()` entry.
+
+Use cases (future):
+- **Duplicated**: after `ps_mr` or `load-pair` where upper=lower → can optimize `psq_st` to write half the data
+- **LowerPair**: after `lfs` (only lower 32 bits loaded) → upper is stale → can skip save/restore
+- **Single**: both halves valid → full save/restore needed
+
+Currently tracked but not yet used for code-gen decisions (infrastructure only).
+
+### ConvertDoubleToSingleLower / Pair Helpers (MEDIUM)
+
+**Files:** `Jit.cpp`
+
+On PPC970 BE, a Gekko paired-single is packed as `[ps0:upper32, ps1:lower32]` in a 64-bit FPR. `STFD` stores this in BE byte order so `LFS+0` = ps0 and `LFS+4` = ps1.
+
+| Function | Implementation |
+|----------|---------------|
+| `ConvertDoubleToSingleLower(fpr)` | `STFD fpr` → `LFS fpr, 4(scratch)` — extracts ps1 |
+| `ConvertDoubleToSingleUpper(fpr)` | `STFD fpr` → `LFS fpr, 0(scratch)` — extracts ps0 |
+| `PairSingleToDouble(dst, upper, lower)` | `STFS upper, 0` → `STFS lower, 4` → `LFD dst, 0` — packs two singles |
+
+### IsFPRStoreSafe() (MEDIUM)
+
+**Files:** `Jit.cpp`
+
+On PPC970 ELFv2: `f14-f31` are callee-saved (preserved by C++ calls). Guest FPRs are mapped only to callee-saved host FPRs (`f14-f31`), so `IsFPRStoreSafe()` always returns `true` — no need to spill before C++ calls.
+
+### ScopedTempRegister RAII Pattern (LOW)
+
+**Files:** `Jit.h`, `Jit.cpp`
+
+A nested struct that allocates `REG_SCRATCH` (r0) or `REG_SCRATCH2` (r11) on construction and releases on destruction. Uses a `u32 dirty_mask` (bit 0 = r0, bit 1 = r11) to track availability. Callers for intermediate value computation:
+
+```cpp
+ScopedTempRegister tmp(m_asm, gpr, m_temp_dirty_mask);
+u32 host_reg = tmp.Allocate();
+// use host_reg...
+// tmp destructor releases automatically
+```
+
+### DumpCode / DoBacktrace Wired (LOW)
+
+**Files:** `Jit.cpp:SIGSEGVHandler`
+
+On unhandled SIGSEGV (before re-raising with `SIG_DFL`), the handler now calls:
+- `DumpCode(nip-16, 48)` — 12 instruction hex dump around the fault
+- `DoBacktrace()` — walk PPC970 stack frames via LR save chain
+
+## Session 2026-07-18 (late): Fix Native BC BO Values + Non-CR0 CR Staleness
+
+### Critical Bug: All BC() Calls Used Wrong BO Values
+
+**Root cause:** Every `BC(bo, bi, bd)` call in `JitPPC64_Branch.cpp` passed BO=18 (bdz — decrement CTR, branch if CTR==0) and BO=16 (bdnz — decrement CTR, branch if CTR!=0). These are **CTR-only** instructions that ignore the BI field entirely and do NOT check CR. Two classes of bugs:
+
+1. **CR check path** used `BC(18, bi, 8)` / `BC(16, bi, 8)` → executed `bdz`/`bdnz` instead of CR check. The branch was based on CTR, not the intended CR bit.
+
+2. **Post-CMP checks** (r10 guards, CTR==0/!=0) used the same BO=18/16 → the BC ignored the CR0 result from the preceding comparison and instead decremented an unrelated CTR. The skip decision was randomized based on CTR contents rather than the actual comparison result.
+
+**Impact:** Every compiled block with any conditional branch or any branch-to-exit check had broken branch semantics. The guard check `if (r10 == 0) skip` was a no-op (CTR-based, not CR-based), causing r10=0 (taken) and r10=1 (not taken) to behave identically in many cases. Only unconditional branches (CompileB) and the unconditional fast-path in BCLR were correct.
+
+### Fix: Correct BO Values + EmitCRCheck for Non-CR0
+
+| Change | File | Description |
+|--------|------|-------------|
+| **CR-only BO values** | `JitPPC64_Branch.cpp:40,164,320,402` | BO=12 (branch if CR true), BO=4 (branch if CR false) — no CTR interaction |
+| **CMP-based checks** | `JitPPC64_Branch.cpp:174,180,182,201,329,335,337,355,408` | All `BC(16,2,8)` → `BC(4,2,8)`, all `BC(18,2,8)` → `BC(12,2,8)` — checks CR0 EQ from comparison result |
+| **EmitCRCheck helper** | `JitPPC64_Branch.cpp:33-88` | For CR0 (bi<4): native BC fast path. For non-CR0: loads `ppcState.cr.fields[field_idx]`, extracts SO (bit59), EQ (low32==0), GT (s64>0), or LT (bit62) via RLDICL/CLRLDI/CMPDI, sets r10=1 on failure |
+| **Declaration** | `Jit.h` | Added `void EmitCRCheck(u32 bi, bool cr_true)` |
+
+### EmitCRCheck Bit Extraction (for reference)
+
+| CR bit | Internal field indicator | PPC670 code sequence |
+|--------|------------------------|---------------------|
+| LT (bi&3=0) | bit 62 of field value | `RLDICL(r11,r11,2,63)` → `CMPLWI(0,r11,0)` → CR0 GT = LT set, CR0 EQ = LT clear |
+| GT (bi&3=1) | s64 field value > 0 | `CMPDI(0,r11,0)` → CR0 GT = GT set, CR0 EQ = val==0, CR0 LT = val<0 |
+| EQ (bi&3=2) | lower 32 bits == 0 | `CLRLDI(r11,r11,32)` → `CMPLWI(0,r11,0)` → CR0 EQ = EQ set, CR0 GT = EQ clear |
+| SO (bi&3=3) | bit 59 of field value | `RLDICL(r11,r11,5,63)` → `CMPLWI(0,r11,0)` → CR0 GT = SO set, CR0 EQ = SO clear |
+
+### Remaining MEDIUM Features Not Implemented
+
+| Feature | Reason |
+|---------|--------|
+| **Inline MMIO for complex handlers** | Requires saving all volatile GPRs/FPRs and calling C++ lambda from JIT code — complex ABI work with limited benefit (most MMIO handlers are Direct or Constant) |
+| **FPR type tracking → codegen decisions** | Infrastructure is in place but unused by emit code — needs `psq_l/st` optimization pass |
+

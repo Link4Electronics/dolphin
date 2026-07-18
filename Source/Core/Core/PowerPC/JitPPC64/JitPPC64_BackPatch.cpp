@@ -342,7 +342,15 @@ bool JitPPC64::HandleFault(uintptr_t access_address, SContext* ctx)
 
       // Compute relative branch: b slow_access_code
       // LI must be at PPC bits 6-29 = u32 bits [25:2], hence the << 2 shift.
+      // The PPC `b` instruction has a ±32 MB range (signed 24-bit LI).
       ptrdiff_t dist = area.slow_access_code - area.fast_access_code;
+      if (dist > 0x01FFFFFF * 4 || dist < -static_cast<ptrdiff_t>(0x02000000 * 4))
+      {
+        ERROR_LOG_FMT(POWERPC,
+                      "HandleFault: trampoline too far ({} bytes, max ±32 MB) — "
+                      "increase TRAMP_CODE_SIZE or reduce JIT_CODE_SIZE",
+                      dist);
+      }
       u32 li = (static_cast<u32>(dist >> 2)) & 0x00FFFFFF;
       u32 branch = (18u << 26) | (li << 2);
 

@@ -38,7 +38,7 @@ public:
   // sign-extend (e.g. 0xFF00 becomes 0xFFFFFFFFFF00 with ADDI on PPC64).
   void LI32(u32 rd, u32 value)
   {
-    ORIS(rd, 0, static_cast<u32>(value >> 16));
+    ADDIS(rd, 0, static_cast<s32>(value >> 16));
     ORI(rd, rd, value & 0xFFFF);
   }
   void SUBF(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 40, rc)); }
@@ -54,6 +54,7 @@ public:
   void MULLW(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 235, rc)); }
   void MULHW(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 75, rc)); }
   void MULHWU(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 11, rc)); }
+  void MULHDU(u32 rd, u32 ra, u32 rb) { Write32(X(31, rd, ra, rb, 9, false)); }
   void DIVW(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 491, rc)); }
   void DIVWU(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 459, rc)); }
 
@@ -98,16 +99,19 @@ public:
   }
 
   // -- Compare (opcd=31 X-form with crfD at bits 25:23, L at bit 22) --
-  // RA is at PPC bits 10:14 = u32 bits 21:17, RB at PPC 15:19 = u32 16:12
-  // This DIFFERS from standard X-form where RA is at u32 20:16, RB at 15:11
-  void CMPW(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (ra << 17) | (rb << 12) | (0 << 1)); }
-  void CMPLW(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (ra << 17) | (rb << 12) | (32 << 1)); }
-  // CMPI/CMPLI (opcd 10/11) use similar crfD-variant: RA at u32 21:17, SIMM at u32 16:1
-  void CMPWI(u32 crf, u32 ra, s32 sim) { Write32((11u << 26) | (crf << 23) | (0u << 22) | (ra << 17) | ((sim & 0xFFFF) << 1)); }
-  void CMPLWI(u32 crf, u32 ra, u32 ui) { Write32((10u << 26) | (crf << 23) | (0u << 22) | (ra << 17) | ((ui & 0xFFFF) << 1)); }
+  // PPC CMP X-form: RA at arch bits 10-14 = u32 bits 21:17, RB at arch bits 15-19 = u32 bits 16:12
+  // (different from standard X-form because crfD+L take 4 bits instead of rt's 5 bits)
+  void CMPW(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (0u << 22) | (ra << 17) | (rb << 12) | (0 << 1)); }
+  void CMPLW(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (0u << 22) | (ra << 17) | (rb << 12) | (32 << 1)); }
+  void CMPD(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (1u << 22) | (ra << 17) | (rb << 12) | (0 << 1)); }
+  void CMPLD(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (1u << 22) | (ra << 17) | (rb << 12) | (32 << 1)); }
+  // CMPI/CMPLI (opcd 10/11): RA at arch bits 10-14 = u32 bits 21:17, SIMM at u32 15:0
+  // crfD+L takes 4 bits (arch 6-9), shifting RA 1 bit up vs standard D-form
+  void CMPWI(u32 crf, u32 ra, s32 sim) { Write32((11u << 26) | (crf << 23) | (0u << 22) | (ra << 17) | (sim & 0xFFFF)); }
+  void CMPLWI(u32 crf, u32 ra, u32 ui) { Write32((10u << 26) | (crf << 23) | (0u << 22) | (ra << 17) | (ui & 0xFFFF)); }
   // CMPDI/CMPLDI (L=1 for 64-bit doubleword compare): same RA/SIMM layout with L=1
-  void CMPDI(u32 crf, u32 ra, s32 sim) { Write32((11u << 26) | (crf << 23) | (1u << 22) | (ra << 17) | ((sim & 0xFFFF) << 1)); }
-  void CMPLDI(u32 crf, u32 ra, u32 ui) { Write32((10u << 26) | (crf << 23) | (1u << 22) | (ra << 17) | ((ui & 0xFFFF) << 1)); }
+  void CMPDI(u32 crf, u32 ra, s32 sim) { Write32((11u << 26) | (crf << 23) | (1u << 22) | (ra << 17) | (sim & 0xFFFF)); }
+  void CMPLDI(u32 crf, u32 ra, u32 ui) { Write32((10u << 26) | (crf << 23) | (1u << 22) | (ra << 17) | (ui & 0xFFFF)); }
 
   // -- Load/Store (D-form) --
   void LWZ(u32 rt, u32 ra, s32 d) { Write32(D(32, rt, ra, d)); }
@@ -183,7 +187,7 @@ public:
   // B-form: |16|BO|BI|BD(14b)|AA|LK| — BD at PPC 16-29=u32 15-2, AA/LK at PPC 30-31=u32 1-0
   void BC(u32 bo, u32 bi, s32 bd, bool aa = false, bool lk = false)
   {
-    Write32((16u << 26) | ((bo & 0x1F) << 21) | ((bi & 0x1F) << 16) | (((bd >> 2) & 0x1FFF) << 2) |
+    Write32((16u << 26) | ((bo & 0x1F) << 21) | ((bi & 0x1F) << 16) | (((bd >> 2) & 0x3FFF) << 2) |
             (aa ? 1u << 1 : 0u) | (lk ? 1u : 0u));
   }
 
@@ -200,10 +204,12 @@ public:
   }
 
   // -- Condition register (crfD-variant, opcd=19) --
-  // |19|crfD|crfS|0000|00000|0000000000|0| — crfS at PPC 9:11 = u32 22:20
+  // MCRF is XL-form: BT=crfD||00, BA=crfS||00, BB=00000, xo=0, LK=0
+  // BT at PPC 6-10 = u32 25-21: crfD<<23 fills bits 25-23, bits 22-21=0
+  // BA at PPC 11-15 = u32 20-16: crfS<<18 fills bits 20-18, bits 17-16=0
   void MCRF(u32 crfd, u32 crfs)
   {
-    Write32((19u << 26) | (crfd << 23) | (crfs << 20) | (0u << 1));
+    Write32((19u << 26) | (crfd << 23) | (crfs << 18) | (0u << 1));
   }
   void CRAND(u32 bt, u32 ba, u32 bb) { Write32(XL(19, bt, ba, bb, 257)); }
   void CRNAND(u32 bt, u32 ba, u32 bb) { Write32(XL(19, bt, ba, bb, 225)); }
@@ -251,6 +257,8 @@ public:
   void STHBRX(u32 rs, u32 ra, u32 rb) { Write32(X(31, rs, ra, rb, 918, false)); }
   // stfiwx — store FPR as integer word
   void STFIWX(u32 frs, u32 ra, u32 rb) { Write32(X(31, frs, ra, rb, 983, false)); }
+  // lfiwax — load integer word as floating-point (s32 → double)
+  void LFIWAX(u32 frD, u32 ra, u32 rb) { Write32(X(31, frD, ra, rb, 887, false)); }
 
   // -- Cache / Misc (opcd=31) --
   void DCBF(u32 ra, u32 rb) { Write32(X(31, 0, ra, rb, 86, false)); }
@@ -280,22 +288,27 @@ public:
   void STDUX(u32 rs, u32 ra, u32 rb) { Write32(X(31, rs, ra, rb, 181, false)); }
 
   // rldicr RA, RS, SH, ME — rotate left double immediate and clear right
-  // Kernel encoding (PPC_RAW_RLDICR):
-  //   base=0x78000004 | sh[4:0]@bits15:11 | sh[5]@bit1 | me[4:0]@bits10:6 | me[5]@bit5
-  // u32: |31:26|25:21|20:16|15:11|10:6|5|4|3|2|1|0|
+  // MD-form: opcd=30, xo=1 at PPC bits 27-30 (= u32 bits 4:1 = 0b0001)
+  //   u31-u26: opcd=30, u25-21: RS, u20-16: RA,
+  //   u15-u11: sh[4:0], u10: sh[5],
+  //   u9-u5: me[4:0], u4: me[5],
+  //   u4-u1: xo (4-bit, 0001=rldicr, 0000=rldicl), u0: Rc
   void RLDICR(u32 ra, u32 rs, u32 sh, u32 me, bool rc = false)
   {
-    Write32(0x78000004u | (rs << 21) | (ra << 16) | ((sh & 0x1F) << 11) |
-            ((me & 0x1F) << 6) | ((sh & 0x20) >> 4) | (me & 0x20) | (rc ? 1u : 0u));
+    Write32((30u << 26) | ((rs & 0x1F) << 21) | ((ra & 0x1F) << 16) |
+            ((sh & 0x1F) << 11) | (((sh >> 5) & 1) << 10) |
+            ((me & 0x1F) << 5) | (((me >> 5) & 1) << 4) |
+             (1u << 1) | (rc ? 1u : 0u));
   }
 
-  // rldicl RA, RS, SH, MB — clear upper bits (e.g., rldicl rd, rs, 0, 32 = zero-extend 32-bit)
-  // Kernel encoding (PPC_RAW_RLDICL):
-  //   base=0x78000000 | sh[4:0]@bits15:11 | sh[5]@bit1 | mb[4:0]@bits10:6 | mb[5]@bit5
+  // rldicl RA, RS, SH, MB — clear left bits (e.g., rldicl rd, rs, 0, 32 = zero-extend 32-bit)
+  // MD-form: opcd=30, xo=0 at PPC bits 27-30 (= u32 bits 4:1 = 0b0000)
   void RLDICL(u32 ra, u32 rs, u32 sh, u32 mb, bool rc = false)
   {
-    Write32(0x78000000u | (rs << 21) | (ra << 16) | ((sh & 0x1F) << 11) |
-            ((mb & 0x1F) << 6) | ((sh & 0x20) >> 4) | (mb & 0x20) | (rc ? 1u : 0u));
+    Write32((30u << 26) | ((rs & 0x1F) << 21) | ((ra & 0x1F) << 16) |
+            ((sh & 0x1F) << 11) | (((sh >> 5) & 1) << 10) |
+            ((mb & 0x1F) << 5) | (((mb >> 5) & 1) << 4) |
+            (0u << 2) | (rc ? 1u : 0u));
   }
 
   // Zero-extend 32-bit: rldicl rd, rs, 0, 32  (clear upper 32 bits)
@@ -414,14 +427,15 @@ public:
   void FNMADD(u32 frd, u32 fra, u32 frb, u32 frc) { Write32(A(63, frd, fra, frb, frc, 31, false)); }
   void FNMSUB(u32 frd, u32 fra, u32 frb, u32 frc) { Write32(A(63, frd, fra, frb, frc, 30, false)); }
 
-  // FPU X-form (opcd=63)
+  // FPU X-form compare (opcd=63): frA at arch bits 10-14 = u32 21:17, frB at arch 15-19 = u32 16:12
+  // (same off-by-1 shift as integer compares: crfD+L take 4 bits vs rt's 5 bits)
   void FCMPU(u32 crf, u32 fra, u32 frb)
   {
-    Write32((63u << 26) | ((crf & 0x7) << 23) | ((fra & 0x1F) << 16) | ((frb & 0x1F) << 11) | (0u << 1));
+    Write32((63u << 26) | ((crf & 0x7) << 23) | ((fra & 0x1F) << 17) | ((frb & 0x1F) << 12) | (0u << 1));
   }
   void FCMPO(u32 crf, u32 fra, u32 frb)
   {
-    Write32((63u << 26) | ((crf & 0x7) << 23) | ((fra & 0x1F) << 16) | ((frb & 0x1F) << 11) | (32u << 1));
+    Write32((63u << 26) | ((crf & 0x7) << 23) | ((fra & 0x1F) << 17) | ((frb & 0x1F) << 12) | (32u << 1));
   }
   void FMR(u32 frd, u32 frb)   { Write32(X(63, frd, 0, frb, 72, false)); }
   void FNEG(u32 frd, u32 frb)  { Write32(X(63, frd, 0, frb, 40, false)); }
@@ -429,6 +443,8 @@ public:
   void FNABS(u32 frd, u32 frb) { Write32(X(63, frd, 0, frb, 136, false)); }
   void FCTIW(u32 frd, u32 frb)  { Write32(X(63, frd, 0, frb, 14, false)); }
   void FCTIWZ(u32 frd, u32 frb) { Write32(X(63, frd, 0, frb, 15, false)); }
+  void FCFID(u32 frd, u32 frb)  { Write32(X(63, frd, 0, frb, 846, false)); }
+  void FCTIDZ(u32 frd, u32 frb) { Write32(X(63, frd, 0, frb, 815, false)); }
 
   // FPSCR access (X-form, opcd=63)
   void MFFS(u32 frd)           { Write32(X(63, frd, 0, 0, 583, false)); }
@@ -438,7 +454,7 @@ public:
   }
   void MTFSFI(u32 crfd, u32 imm)
   {
-    Write32((63u << 26) | ((crfd & 0x7) << 23) | ((imm & 0xF) << 12) | (134u << 1));
+    Write32((63u << 26) | ((crfd & 0x7) << 23) | ((imm & 0xF) << 17) | (134u << 1));
   }
   void MTFSB0(u32 bit) { Write32(X(63, 0, 0, bit, 70, false)); }
   void MTFSB1(u32 bit) { Write32(X(63, 0, 0, bit, 38, false)); }

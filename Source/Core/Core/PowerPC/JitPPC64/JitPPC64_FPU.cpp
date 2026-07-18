@@ -195,7 +195,7 @@ bool JitPPC64::CompileFPUDouble(UGeckoInstruction inst)
   // FPSCR
   if (xo10 == 583) { m_asm.MFFS(0); m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFF(fd))); return true; }
   if (xo10 == 711) { m_asm.LFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFF(fb))); m_asm.MTFSF(inst.CRM, 0); return true; }
-  if (xo10 == 134) { m_asm.MTFSFI(inst.CRFD, (inst.hex >> 15) & 0xF); return true; }
+  if (xo10 == 134) { m_asm.MTFSFI(inst.CRFD, (inst.hex >> 17) & 0xF); return true; }
   if (xo10 == 70)  { m_asm.MTFSB0(fb); return true; }
   if (xo10 == 38)  { m_asm.MTFSB1(fb); return true; }
 

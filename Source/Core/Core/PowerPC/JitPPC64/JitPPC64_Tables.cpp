@@ -38,14 +38,13 @@ bool CanCompileInstruction(UGeckoInstruction inst)
     u32 xo = inst.SUBOP10;
     switch (xo)
     {
-    // Integer ALU (fully implemented)
-    // Note: mfcr (19) and mtcrf (144) are excluded — ppcState.cr is a
-    // ConditionRegister (internal 64-bit format), not a plain u32, so
-    // LWZ/STW from CR_OFFSET reads/writes garbage.
+    // Integer ALU + System Register (fully implemented)
+    // mfcr(19) uses a BL helper (ConditionRegister 8×u64 → u32),
+    // mtcrf(144) uses native MTCRF.
     case 0:   case 4:   case 8:   case 10:  case 11:
-    case 24:  case 26:  case 28:  case 32:
+    case 19:  case 24:  case 26:  case 28:  case 32:
     case 40:  case 60:  case 75:  case 83:  case 124:
-    case 146: case 235: case 266: case 284:
+    case 144: case 146: case 235: case 266: case 284:
     case 316: case 339: case 412: case 444:
     case 459: case 467: case 476: case 491:
     case 536: case 792: case 824: case 922: case 954:
@@ -56,18 +55,18 @@ bool CanCompileInstruction(UGeckoInstruction inst)
     case 232: case 234:
       return true;
 
-    // mftb — compiled via CompileMFTB. The timebase SPRs are refreshed by
-    // JitPPC64Dispatch() before every block dispatch (reads CoreTiming's
-    // GetFakeTimeBase() and writes to ppcState.spr[SPR_TL/SPR_TU]), so the
-    // cached SPR load in CompileMFTB returns the correct emulated value.
-    case 371:
+    case 371:  return true;  // mftb — inline GetFakeTimeBase with merge optimization
+
+    // mcrxr — move XER to CR0 (implemented in CompileTable31_Integer)
+    case 512:
       return true;
 
-    // Integer indexed loads/stores
-    case 23:  case 55:  case 87:  case 119:
-    case 151: case 183: case 215: case 247:
+    // Integer indexed loads/stores (including lwarx/stwcx./eciwx/ecowx)
+    case 20:  case 23:  case 55:  case 87:  case 119:
+    case 150: case 151: case 183: case 215: case 247:
     case 279: case 311: case 343: case 375:
     case 407: case 439:
+    case 310: case 438:   // eciwx/ecowx
       return true;
 
     // Byte-reversed loads/stores
@@ -80,9 +79,11 @@ bool CanCompileInstruction(UGeckoInstruction inst)
     case 983:
       return true;
 
-    // Cache/misc (dcbz=1014 emulated with 8 word-stores)
+    // Cache/misc (dcbz=1014 emulated with 8 word-stores).
+    // icbi=982 returns false → block falls to interpreter (which calls
+    // JitInterface::InvalidateICacheLine via the icbi handler).
     case 54:  case 86:  case 246: case 278:
-    case 470: case 598: case 854: case 982:
+    case 470: case 598: case 854:
     case 1014:
       return true;
 
@@ -109,14 +110,8 @@ bool CanCompileInstruction(UGeckoInstruction inst)
 
   case 18:  // b
     return true;
-  case 16:  // bc — only JIT when CR check is skipped (CTR-only or unconditional)
-  {
-    // CR_skip = (BO >> 4) & 1. When cr_skip is set, the branch doesn't check CR.
-    // ppcState.cr is a ConditionRegister (internal 64-bit format), not a plain u32,
-    // so LWZ-based CR reads from JIT code return garbage. We must fall back to
-    // the interpreter for any CR-checking branch.
-    return (inst.BO >> 4) & 1;
-  }
+  case 16:  // bc — CR-checking branches now supported
+    return true;
 
   case 19:  // opcd 19
   {
@@ -124,9 +119,9 @@ bool CanCompileInstruction(UGeckoInstruction inst)
     if (sub10 == 0)   return true;  // mcrf
     if (sub10 == 150) return true;  // isync
     if (sub10 >= 33 && sub10 <= 449) return true;  // CR logical
-    // bclr (16) and bcctr (528) — only JIT when CR check is skipped
-    if (sub10 == 16 || sub10 == 528)
-      return (inst.BO >> 4) & 1;
+    // bclr (16), bclrl (18), bcctr (528), bcctrl (530) — CR-checking now supported
+    if (sub10 == 16 || sub10 == 18 || sub10 == 528 || sub10 == 530)
+      return true;
     return false;
   }
 
@@ -158,7 +153,8 @@ bool CanCompileInstruction(UGeckoInstruction inst)
     if (subop6 == 6 || subop6 == 7 || subop6 == 38 || subop6 == 39)
       return true;
     u32 xo10 = inst.SUBOP10;
-    if (xo10 == 40 || xo10 == 72 || xo10 == 136 || xo10 == 264 ||
+    if (xo10 == 0 || xo10 == 32 || xo10 == 64 || xo10 == 96 ||  // ps_cmpu0/cmpo0/cmpu1/cmpo1
+        xo10 == 40 || xo10 == 72 || xo10 == 136 || xo10 == 264 ||
         xo10 == 528 || xo10 == 560 || xo10 == 592 || xo10 == 624)
       return true;
     u32 xo5 = inst.SUBOP5;

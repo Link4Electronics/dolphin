@@ -38,6 +38,18 @@ bool JitPPC64::CompileADDIC(UGeckoInstruction inst)
   s32 simm = static_cast<s32>(static_cast<s16>(inst.SIMM_16));
   u32 host_rd = gpr.W(rd);
   u32 host_ra = gpr.R(ra);
+
+  if (simm == 0)
+  {
+    // rd = ra (no carry ever)
+    m_asm.OR(host_rd, host_ra, host_ra);
+    m_asm.LI(REG_SCRATCH, 0);
+    m_asm.STB(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+    m_ca_known = true;
+    m_ca_value = 0;
+    return true;
+  }
+
   m_asm.ADDI(host_rd, host_ra, simm);
   // CA = 1 if result < ra unsigned (carry out)
   m_asm.CMPLW(0, host_rd, host_ra);
@@ -45,6 +57,7 @@ bool JitPPC64::CompileADDIC(UGeckoInstruction inst)
   m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 0);  // keep CR0[LT] = bit 31
   m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 1, 31, 31); // shift bit 31→bit 0 for STB
   m_asm.STB(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+  m_ca_known = false;
   return true;
 }
 
@@ -138,19 +151,29 @@ bool JitPPC64::CompileSubfic(UGeckoInstruction inst)
   u32 host_ra = gpr.R(ra);
   u32 host_rd = gpr.W(rd);
 
-  m_asm.OR(3, host_ra, host_ra);           // r3 = ra (copy for CA computation)
-
   // rd = simm - ra
   m_asm.SUBFIC(host_rd, host_ra, simm);
 
+  if (ra == 0)
+  {
+    // CA = 1 always (u32(simm) >= 0)
+    m_asm.LI(REG_SCRATCH, 1);
+    m_asm.STB(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+    m_ca_known = true;
+    m_ca_value = 1;
+    return true;
+  }
+
   // CA = 1 if u32(simm) >= u32(ra) unsigned (no borrow)
-  m_asm.ADDI(REG_SCRATCH, 0, simm);        // r0 = simm
-  m_asm.CMPLW(0, REG_SCRATCH, 3);          // simm >= ra? r0:r3
-  m_asm.MFCR(REG_SCRATCH2);                // r11 = CR
-  m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH2, 0, 0, 0);   // r0 = bit 31 only
-  m_asm.XORI(REG_SCRATCH, REG_SCRATCH, 0x80000000);    // invert: CA in bit 31
-  m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 1, 31, 31);   // bit 31 → bit 0 for STB
+  m_asm.LI32(REG_SCRATCH, static_cast<u32>(static_cast<s32>(simm)));
+  m_asm.CMPLW(0, REG_SCRATCH, host_ra);    // simm >= ra?
+  // MFCR → keep GT (bit 30) → invert for CA
+  m_asm.MFCR(REG_SCRATCH2);
+  m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH2, 0, 1, 1);   // keep CR0[GT] = bit 30
+  m_asm.XORI(REG_SCRATCH, REG_SCRATCH, 0x40000000);   // invert: CA = !GT
+  m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 2, 31, 31);  // bit 30 → bit 0 for STB
   m_asm.STB(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+  m_ca_known = false;
   return true;
 }
 
@@ -190,13 +213,37 @@ bool JitPPC64::CompileTable31_Integer(UGeckoInstruction inst)
       u32 host_ra = gpr.R(ra);
       u32 host_rb = gpr.R(rb);
       u32 host_rd = gpr.W(rd);
-      m_asm.ADDC(host_rd, host_ra, host_rb);
-      // CA = 1 if result < rb unsigned (carry out)
-      m_asm.CMPLW(0, host_rd, host_rb);
-      m_asm.MFCR(REG_SCRATCH2);
-      m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 0, 0);  // keep CR0[LT] = bit 31
-      m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 1, 31, 31); // shift bit 31→bit 0 for STB
-      m_asm.STB(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+
+      // ra + 0: rd = ra, CA = 0
+      if (rb == 0)
+      {
+        m_asm.OR(host_rd, host_ra, host_ra);
+        m_asm.LI(REG_SCRATCH2, 0);
+        m_asm.STB(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+        m_ca_known = true;
+        m_ca_value = 0;
+      }
+      else if (ra == 0)
+      {
+        // 0 + rb: rd = rb, CA = 0
+        m_asm.OR(host_rd, host_rb, host_rb);
+        m_asm.LI(REG_SCRATCH2, 0);
+        m_asm.STB(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+        m_ca_known = true;
+        m_ca_value = 0;
+      }
+      else
+      {
+        m_asm.ADDC(host_rd, host_ra, host_rb);
+        // CA = 1 if result < rb unsigned (carry out)
+        m_asm.CMPLW(0, host_rd, host_rb);
+        m_asm.MFCR(REG_SCRATCH2);
+        m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 0, 0);  // keep CR0[LT] = bit 31
+        m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 1, 31, 31); // shift bit 31→bit 0 for STB
+        m_asm.STB(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+        m_ca_known = false;
+      }
+      if (rc) EmitCR0Update(host_rd);
     }
     return true;
   case 75:  // mulhwx
@@ -260,14 +307,39 @@ bool JitPPC64::CompileTable31_Integer(UGeckoInstruction inst)
       u32 host_ra = gpr.R(ra);
       u32 host_rb = gpr.R(rb);
       u32 host_rd = gpr.W(rd);
-      m_asm.SUBFC(host_rd, host_ra, host_rb);
-      // CA = 1 if rb >= u32(ra) (no borrow).
-      m_asm.CMPLW(0, host_rd, host_rb);
-      m_asm.MFCR(REG_SCRATCH2);
-      m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 1, 1);  // keep CR0[GT] = bit 30
-      m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 2, 31, 31); // shift bit 30→bit 0 for STB
-      m_asm.XORI(REG_SCRATCH2, REG_SCRATCH2, 1);           // invert: CA = !GT
-      m_asm.STB(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+
+      // subfcx rd, 0, rb: rd = rb - 0 = rb, CA = 1 (no borrow ever)
+      if (ra == 0)
+      {
+        m_asm.OR(host_rd, host_rb, host_rb);
+        m_asm.LI(REG_SCRATCH2, 1);
+        m_asm.STB(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+        m_ca_known = true;
+        m_ca_value = 1;
+      }
+      else if (rb == 0)
+      {
+        // subfcx rd, ra, 0: rd = 0 - ra = NEG(ra), CA = 1 if ra == 0 else 0
+        m_asm.NEG(host_rd, host_ra);
+        // CA = 1 iff ra == 0 (unsigned comparison of 0 >= ra)
+        m_asm.CNTLZW(REG_SCRATCH2, host_ra);
+        m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 5, 31, 31); // bit 26 → bit 0
+        m_asm.STB(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+        m_ca_known = false;  // depends on runtime ra value
+      }
+      else
+      {
+        m_asm.SUBFC(host_rd, host_ra, host_rb);
+        // CA = 1 if rb >= u32(ra) (no borrow).
+        m_asm.CMPLW(0, host_rd, host_rb);
+        m_asm.MFCR(REG_SCRATCH2);
+        m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 1, 1);  // keep CR0[GT] = bit 30
+        m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 2, 31, 31); // shift bit 30→bit 0 for STB
+        m_asm.XORI(REG_SCRATCH2, REG_SCRATCH2, 1);           // invert: CA = !GT
+        m_asm.STB(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+        m_ca_known = false;
+      }
+      if (rc) EmitCR0Update(host_rd);
     }
     return true;
   case 136: // subfex — CA dependency, fallback
@@ -281,8 +353,23 @@ bool JitPPC64::CompileTable31_Integer(UGeckoInstruction inst)
     m_asm.NEG(gpr.W(rd), gpr.R(ra));
     if (rc) EmitCR0Update(gpr.R(rd));
     return true;
-  case 512: // mcrxr — rare → fallback
-    return false;
+  case 512: // mcrxr — move XER[SO,OV,CA] to CR0: CR0_SO=XER_SO, CR0_EQ=XER_OV, CR0_GT=XER_CA, CR0_LT=0
+    {
+      // SO at bit 0 of xer_so_ov → u32 bit 28 (CR0_SO)
+      m_asm.LBZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(XER_SO_OV_OFFSET));
+      m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 28, 28, 28);
+      // OV at bit 1 of xer_so_ov → u32 bit 29 (CR0_EQ)
+      m_asm.LBZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(XER_SO_OV_OFFSET));
+      m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 29, 29, 29);
+      m_asm.OR(REG_SCRATCH, REG_SCRATCH, REG_SCRATCH2);
+      // CA at bit 0 of xer_ca → u32 bit 30 (CR0_GT)
+      m_asm.LBZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+      m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 30, 30, 30);
+      m_asm.OR(REG_SCRATCH, REG_SCRATCH, REG_SCRATCH2);
+      // u32 bit 31 (CR0_LT) stays 0
+      m_asm.MTCRF(0x80, REG_SCRATCH);
+    }
+    return true;
   case 986: // extswx — sign-extend 32-bit word to 64-bit (nop on 32-bit Gekko)
     m_asm.EXTSW(gpr.W(rd), gpr.R(ra));
     if (rc) EmitCR0Update(gpr.R(rd));
@@ -350,7 +437,14 @@ bool JitPPC64::CompileTable31_CA(UGeckoInstruction inst)
   //   REG_SCRATCH2 (r11) = final result (for StoreGPR)
   //   r3-r6 = scratch for intermediates
 
-  m_asm.LBZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));  // r0 = CA
+  if (m_ca_known)
+  {
+    m_asm.LI(REG_SCRATCH, m_ca_value);
+  }
+  else
+  {
+    m_asm.LBZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+  }
 
   switch (xo)
   {
@@ -445,5 +539,7 @@ bool JitPPC64::CompileTable31_CA(UGeckoInstruction inst)
 
   // Store CA result
   m_asm.STB(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+  // CA output depends on runtime operands — no longer constant
+  m_ca_known = false;
   return true;
 }

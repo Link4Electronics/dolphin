@@ -7,6 +7,7 @@
 
 #include "Core/PowerPC/JitCommon/JitBase.h"
 #include "Core/PowerPC/JitCommon/JitCache.h"
+#include "Core/PowerPC/JitCommon/ConstantPropagation.h"
 #include "Core/PowerPC/JitPPC64/JitPPC64_RegCache.h"
 #include "Core/PowerPC/JitPPC64/PPC64Assembler.h"
 
@@ -21,7 +22,7 @@ inline void TrampMOVI64(PPC64Assembler& asm_, u32 rd, u64 imm)
   asm_.ADDIS(rd, 0, h4);
   asm_.RLDICL(rd, rd, 0, 32);
   asm_.ORI(rd, rd, h3);
-  asm_.RLDICR(rd, rd, 32, 31);
+  asm_.RLDICR(rd, rd, 32, 31);  // keep upper 32 bits (me=31): result = h3 << 32
   asm_.ORIS(rd, rd, h2);
   asm_.ORI(rd, rd, lo);
 }
@@ -36,6 +37,13 @@ extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
                                     u32 rd, u32 ra, u64 store_value);
 extern "C" u64 JitPPC64RefreshTimebase(PowerPC::PowerPCState* state);
 
+// psq_l/st C helpers for integer quantize types (U8/U16/S8/S16).
+// Called from JIT-emitted code; takes the MMU pointer for memory access.
+extern "C" void JitPPC64PsqLoad(PowerPC::PowerPCState* state, PowerPC::MMU* mmu,
+                                u32 ea, u32 gqr_idx, u32 fr, u32 w);
+extern "C" void JitPPC64PsqStore(PowerPC::PowerPCState* state, PowerPC::MMU* mmu,
+                                 u32 ea, u32 gqr_idx, u32 rs, u32 w);
+
 // Global JIT instance pointer (set during Init, used by asm dispatcher + signal handler)
 class JitPPC64;
 extern JitPPC64* g_jit_ppc64_instance;
@@ -47,10 +55,17 @@ extern u32 GPR_OFFSET;
 extern u32 CR_OFFSET;
 extern u32 XER_CA_OFFSET;
 extern u32 XER_SO_OV_OFFSET;
+extern u32 RESERVE_OFFSET;
+extern u32 RESERVE_ADDR_OFFSET;
 extern u32 DOWNCOUNT_OFFSET;
 extern u32 SPR_OFFSET;
 extern u32 MSR_OFFSET;
 extern u32 PS_OFFSET;
+extern u32 MEM_PTR_OFFSET;
+extern u32 EXCEPTIONS_OFFSET;
+extern u32 STACK_PTR_OFFSET;
+extern u32 BLR_DEPTH_OFFSET;
+extern u32 FPSCR_OFFSET;
 
 class JitPPC64BlockCache : public JitBaseBlockCache
 {
@@ -129,6 +144,7 @@ private:
   bool CompileSTMW(UGeckoInstruction inst);
 
   // ---- Branch (JitPPC64_Branch.cpp) ----
+  void EmitCRCheck(u32 bi, bool cr_true);
   bool CompileB(UGeckoInstruction inst);
   bool CompileBC(UGeckoInstruction inst);
 
@@ -169,6 +185,16 @@ private:
   bool CompileISYNC(UGeckoInstruction inst);
   bool CompileMisc(UGeckoInstruction inst);
 
+  // ---- Block linking exits ----
+  void WriteExit(u32 destination, bool bl, u32 after);
+  void JustWriteExit(u32 destination, bool bl = false, u32 after = 0);
+  void WriteExceptionExit(u32 destination);
+  void WriteConditionalExceptionExit(int exception);
+  void WriteIdleExit();
+  void WriteBLRExit();
+  void FakeLKExit(u32 after);
+  void ResetStack();
+
   // ---- Indexed Load/Store (JitPPC64_LoadStore.cpp) ----
   bool CompileTable31_LoadStore(UGeckoInstruction inst);
 
@@ -206,6 +232,17 @@ private:
   void StoreCR(u32 host_reg);
   void EmitCR0Update(u32 host_reg);
   void EmitCarryFromReg();
+  void EmitFakeTimeBase();
+  void UpdateRoundingMode();
+
+
+
+public:
+  // Debug helpers
+  void DumpCode(const u8* start, size_t size);
+  void DoBacktrace();
+
+private:
 
   void FallBackToInterpreter(UGeckoInstruction inst);
   void DoNothing(UGeckoInstruction inst);
@@ -215,6 +252,7 @@ private:
   JitPPC64BlockCache m_block_cache{*this};
   PPC64Assembler m_asm;
   JitPPC64RegCache gpr;
+  JitPPC64FPRCache fpr;
 
   // Trampoline code region (adjacent to main code)
   u8* m_tramp_region = nullptr;
@@ -235,6 +273,70 @@ private:
   u32 m_block_end = 0;
   bool m_is_in_block = false;
 
+  // Constant propagation (tracks known GPR values between instructions)
+  JitCommon::ConstantPropagation m_constant_propagation;
+
+  // FPR type tracking: tracks the state of each paired-single register.
+  // On PPC970, an FPR holds two 32-bit singles packed in a 64-bit double.
+  enum class FPRType : u8
+  {
+    Unknown,      // No tracking info
+    Single,       // Both halves valid, distinct values
+    Duplicated,   // Both halves identical (result of ps_mr, load-pair, etc.)
+    LowerPair,    // Only lower half valid; upper is stale
+  };
+  FPRType m_fpr_types[32] = {};
+
+  // Reset FPR type tracking at block entry
+  void ResetFPRTypes() { for (auto& t : m_fpr_types) t = FPRType::Unknown; }
+
+  // Convert between Gekko paired-single (packed in 64-bit FPR) and scalar single.
+  // On PPC970 BE:
+  //   FPR = [ps0:upper32, ps1:lower32] in host 64-bit register
+  //   STFD stores [ps0, ps1] in BE byte order → LFS from +0 gives ps0, +4 gives ps1
+  void ConvertDoubleToSingleLower(u32 fr_idx);
+  void ConvertDoubleToSingleUpper(u32 fr_idx);
+  // Pack two singles (src_upper → ps0, src_lower → ps1) into one FPR
+  void PairSingleToDouble(u32 dst_fpr, u32 src_upper, u32 src_lower);
+
+  // Check if storing an FPR before a C++ call is safe (i.e., the FPR is not
+  // in a volatile/caller-saved host FPR). On PPC970 ELFv2, f14-f31 are
+  // callee-saved. We use f0 for scratch, so we need to save FPRs guest-regs
+  // 0-13 before calling C++ code; f14-f31 are preserved by the callee.
+  bool IsFPRStoreSafe(u32 guest_fpr) const;
+
+  // Scoped RAII temp register: allocates REG_SCRATCH or REG_SCRATCH2 on
+  // construction and frees on destruction. Useful for intermediate values
+  // during code generation without risking register conflicts.
+  struct ScopedTempRegister
+  {
+    explicit ScopedTempRegister(PPC64Assembler& asm_, JitPPC64RegCache& gpr,
+                                u32& dirty_mask)
+        : m_asm(asm_), m_gpr(gpr), m_dirty_mask(dirty_mask) {}
+    ~ScopedTempRegister()
+    {
+      if (m_allocated)
+        Release();
+    }
+    // Allocate: picks the first free scratch register
+    u32 Allocate();
+    // Release the allocated register
+    void Release();
+
+    u32 reg = 0;
+    bool m_allocated = false;
+
+  private:
+    PPC64Assembler& m_asm;
+    JitPPC64RegCache& m_gpr;
+    u32& m_dirty_mask;
+  };
+
+  // Carry (CA/XER) constant tracking within a block.
+  // When CA is known (e.g., after addic with imm=0), reads can skip LBZ from ppcState.
+  bool m_ca_known = false;
+  u32 m_ca_value = 0;
+
   // JIT code buffer
   u8* m_code_region = nullptr;
   u8* m_code_pos = nullptr;
@@ -246,17 +348,32 @@ private:
   // Dispatcher entry point (for block exit linking)
   const u8* m_dispatcher_entry = nullptr;
 
+  // Dispatcher lite (no frame) for block linking fallback
+  const u8* m_dispatcher_lite = nullptr;
+
   // Shared exit sequence: restores host regs, tears down frame, BLR to Run().
   // Both the epilog and branch compilers branch here instead of inline BLR,
   // ensuring r10/r14-r31 are always restored and the frame is always torn down.
   const u8* m_exit_sequence = nullptr;
 
+public:
   // Register usage in compiled code:
   // r12 = ppcState pointer
-  // r11 = scratch
+  // r11 = scratch / EA computation
   // r0  = scratch
+  // r13 = physical base pointer (mem_ptr = host va of guest physical 0) — callee-saved
   // r14-r31 = cached PPC GPRs (via RegCache)
+  static constexpr u32 REG_SP = 1;
   static constexpr u32 REG_PPC_BASE = 12;
   static constexpr u32 REG_SCRATCH = 0;
   static constexpr u32 REG_SCRATCH2 = 11;
+  static constexpr u32 REG_PHYS_BASE = 13;
+
+private:
+
+  // Stack frame layout offsets (from block SP)
+  static constexpr s32 CALLEE_SAVE_BASE = 32;     // r14-r31 saves start here
+  static constexpr s32 EA_SAVE_OFFSET = 200;       // saved guest EA for backpatch
+  static constexpr s32 PHYS_BASE_SAVE_OFFSET = 208; // saved r13 (phys base)
+  static constexpr s32 PSQ_EA_SAVE_OFFSET = 192;   // saved EA for psq integer helper call
 };
