@@ -743,6 +743,15 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
       fprintf(stderr, "  [%02u] 0x%08X: 0x%08X\n", i, addr, hex);
     }
   }
+  // Dump host PPC64 instructions for debugging
+  fprintf(stderr, "JITPROBE: host code dump (%zu bytes):\n", m_asm.Size());
+  for (size_t i = 0; i < m_asm.Size(); i += 4)
+  {
+    u32 hw = 0;
+    if (i + 4 <= m_asm.Size())
+      hw = *reinterpret_cast<const u32*>(block_start + i);
+    fprintf(stderr, "  [%04zu] 0x%08X\n", i, hw);
+  }
 }
 
 // ===========================================================================

@@ -11,6 +11,9 @@ bool JitPPC64::CompileB(UGeckoInstruction inst)
   s32 li = static_cast<s32>(inst.LI << 8) >> 6;
   u32 target = inst.AA ? static_cast<u32>(li) : js.compilerPC + li;
 
+  fprintf(stderr, "JITPROBE: CompileB pc=0x%08X li=%d target=0x%08X lk=%d\n",
+          js.compilerPC, li, target, inst.LK ? 1 : 0);
+
   if (inst.LK)
   {
     u32 lr_value = js.compilerPC + 4;
