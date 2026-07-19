@@ -282,6 +282,9 @@ extern "C" const u8* JitPPC64Dispatch(u32 pc)
   if (!jit)
     return nullptr;
 
+  WARN_LOG_FMT(POWERPC, "JIT: dispatch pc={:08x} downcount={}", pc,
+               jit->m_ppc_state.downcount);
+
   // Update the emulated timebase from CoreTiming before each block dispatch.
   // This ensures CompileMFTB's cached SPR reads return fresh values, and that
   // the timebase advances between loop iterations (even within the same slice,
