@@ -141,7 +141,7 @@ void JitPPC64BlockCache::WriteLinkBlock(const JitBlock::LinkData& source, const 
     }
   }
 
-  // Fall back to dispatcher_lite (no frame, just checks downcount and dispatches)
+  // Fall back to dispatcher_lite
   auto* jit = static_cast<JitPPC64*>(&m_jit);
   if (jit->m_dispatcher_lite)
   {
@@ -411,17 +411,19 @@ void JitPPC64::CompileDispatcher()
   m_asm.BLR();                   // return to Run()
 
   // ── dispatcher_lite (for block linking exits) ─────────────────────────
-  // Called from JustWriteExit (BRel).  No dispatcher frame — SP = block_SP.
+  // Called from JustWriteExit (BRel).  SP = block_SP = enter_code_SP - FRAME_SIZE.
   // r12 = &ppcState.  LR is saved by the block's prolog at block_SP + 16.
-  // We load Run_LR from there instead of using MFLR — block BRel would
-  // overwrite r14 with the BRel return address, not Run_LR.
+  // We load Run_LR from there and dispatch.  The block frame is kept intact
+  // until we know whether we're exiting (→ m_dispatcher_exit, which restores
+  // callee-saved regs from the frame) or continuing (tear down frame, jump).
   m_dispatcher_lite = m_asm.Code() + m_asm.Size();
   m_asm.LD(14, 1, 16);   // r14 = Run_LR from block's prolog LR save
 
+  // Frame is INTACT here — m_dispatcher_exit will restore callee-saved regs
   m_asm.LWZ(11, REG_PPC_BASE, DOWNCOUNT_OFFSET);
   m_asm.CMPWI(0, 11, 0);
 
-  // ble exit_lite (branch if downcount ≤ 0)
+  // ble → m_dispatcher_exit (branch if downcount ≤ 0) — placeholder
   const u8* ble_lite_pos = m_asm.Code() + m_asm.Size();
   m_asm.BC(4, 1, 0);
 
@@ -431,28 +433,40 @@ void JitPPC64::CompileDispatcher()
   m_asm.MTCTR(12);
   m_asm.BCTRL();
 
-  // beq exit_lite (branch if r3 == 0)
+  // beq → m_dispatcher_exit (block not found, frame still intact) — placeholder
   m_asm.CMPLDI(0, 3, 0);
   const u8* beq_lite_pos = m_asm.Code() + m_asm.Size();
   m_asm.BC(12, 2, 0);
 
-  // Success: jump to next block (LR = Run_LR via r14, no dispatcher frame)
+  // Success: tear down frame and jump to next block
+  m_asm.ADDI(1, 1, FRAME_SIZE);
   m_asm.MTLR(14);
   m_asm.MTCTR(3);
   m_asm.BCTR();
 
-  // Exit: return to Run() via Run_LR
-  const u8* exit_lite_pos = m_asm.Code() + m_asm.Size();
-  m_asm.LD(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(STACK_PTR_OFFSET));
-  m_asm.MR(REG_SP, REG_SCRATCH);
-  m_asm.MTLR(14);
+  // ── m_dispatcher_exit: restore callee-saved regs and return to Run() ──
+  // Called from dispatcher_lite when downcount ≤ 0 or block not found.
+  // r1 = block_SP (frame intact — we haven't torn it down yet).
+  // r12 = &ppcState.  r14 = Run_LR.
+  m_dispatcher_exit = m_asm.Code() + m_asm.Size();
+  m_asm.LD(10, 1, static_cast<s32>(CALLEE_SAVE_BASE + (31 - 14 + 1) * 8));
+  m_asm.LD(REG_PHYS_BASE, 1, PHYS_BASE_SAVE_OFFSET);
+  for (u32 i = 14; i <= 31; ++i)
+    m_asm.LD(i, 1, static_cast<s32>(CALLEE_SAVE_BASE + (i - 14) * 8));
+  // Restore callee-saved FPRs
+  for (u32 i = 14; i <= 31; ++i)
+    m_asm.LFD(i, 1, static_cast<s32>(CALLEE_SAVE_FPR_BASE + (i - 14) * 8));
+  // Load LR before tearing down frame (LR is at 16(r1) within the block frame)
+  m_asm.LD(REG_SCRATCH, 1, 16);
+  m_asm.ADDI(1, 1, FRAME_SIZE);
+  m_asm.MTLR(REG_SCRATCH);
   m_asm.BLR();
 
   // ── Patch placeholder branch offsets ───────────────────────────────────
-  s32 ble_bd = static_cast<s32>(exit_pos - ble_pos);       // byte distance
+  s32 ble_bd = static_cast<s32>(exit_pos - ble_pos);
   s32 beq_bd = static_cast<s32>(exit_pos - beq_pos);
-  s32 ble_lite_bd = static_cast<s32>(exit_lite_pos - ble_lite_pos);
-  s32 beq_lite_bd = static_cast<s32>(exit_lite_pos - beq_lite_pos);
+  s32 ble_lite_bd = static_cast<s32>(m_dispatcher_exit - ble_lite_pos);
+  s32 beq_lite_bd = static_cast<s32>(m_dispatcher_exit - beq_lite_pos);
 
   auto patch_bc = [](u8* pos, s32 bd, u32 bo, u32 bi) {
     u32 enc = (16u << 26) | ((bo & 0x1F) << 21) | ((bi & 0x1F) << 16) |
@@ -466,32 +480,18 @@ void JitPPC64::CompileDispatcher()
   // Flush icache for all patched branch instructions
   __builtin___clear_cache(const_cast<u8*>(ble_pos), const_cast<u8*>(beq_lite_pos + 4));
 
-  // ── Shared block exit sequence ─────────────────────────────────────────
-  // This is branched to from EVERY compiled block (both via the epilog and
-  // directly from branch compilers).  It restores host registers that the
-  // block may have clobbered, tears down the block's stack frame, restores
-  // LR from the parent frame, and BLRs back to Run().
-  //
-  // r1 must point to the block's frame (i.e., before frame tear-down).
-  // r12 must be REG_PPC_BASE (&ppcState) for the STW/STB in the epilog.
-  // PC_OFFSET must have already been written with the next guest PC.
-  m_exit_sequence = m_asm.Code() + m_asm.Size();
-  m_asm.LD(10, 1, static_cast<s32>(CALLEE_SAVE_BASE + (31 - 14 + 1) * 8));
-  m_asm.LD(REG_PHYS_BASE, 1, PHYS_BASE_SAVE_OFFSET);
-  for (u32 i = 14; i <= 31; ++i)
-    m_asm.LD(i, 1, static_cast<s32>(CALLEE_SAVE_BASE + (i - 14) * 8));
-  // Restore callee-saved FPRs
-  for (u32 i = 14; i <= 31; ++i)
-    m_asm.LFD(i, 1, static_cast<s32>(CALLEE_SAVE_FPR_BASE + (i - 14) * 8));
-  m_asm.ADDI(1, 1, FRAME_SIZE);
-  m_asm.LD(REG_SCRATCH, 1, 16);
-  m_asm.MTLR(REG_SCRATCH);
-  m_asm.BLR();
-
   // Flush icache for dispatcher code — PPC970 has separate I-cache and D-cache
   __builtin___clear_cache(const_cast<u8*>(m_asm.Code()),
-                          const_cast<u8*>(m_asm.Code() + m_asm.Size()));
+                           const_cast<u8*>(m_asm.Code() + m_asm.Size()));
   m_code_pos = const_cast<u8*>(m_asm.Code() + m_asm.Size());
+
+  // Generate asm routines after the dispatcher code
+  GenerateAsmRoutines();
+
+  // Initialize branch watch counters base
+  m_branch_counters_base = m_code_pos;
+  m_branch_counters.clear();
+  m_branch_counters_used = 0;
 }
 
 // ===========================================================================
@@ -500,9 +500,13 @@ void JitPPC64::CompileDispatcher()
 
 void JitPPC64::EmitProlog()
 {
+  // STDU must come BEFORE STD — matching the enter_code pattern.
+  // STDU allocates the frame and stores backchain; STD then saves LR at
+  // new_SP + 16 (within the callee's frame).  dispatcher_lite's LD(14,1,16)
+  // loads from this same offset.
   m_asm.MFLR(REG_SCRATCH);
-  m_asm.STD(REG_SCRATCH, 1, 16);
   m_asm.STDU(1, 1, -static_cast<s32>(FRAME_SIZE));
+  m_asm.STD(REG_SCRATCH, 1, 16);
 
   // Save r10 (clobbered by CompileBC as not-taken flag) and r13 (physical base)
   m_asm.STD(10, 1, static_cast<s32>(CALLEE_SAVE_BASE + (31 - 14 + 1) * 8));
@@ -515,20 +519,25 @@ void JitPPC64::EmitProlog()
     m_asm.STFD(i, 1, static_cast<s32>(CALLEE_SAVE_FPR_BASE + (i - 14) * 8));
 
   // Load REG_PPC_BASE with &ppcState (the emulated CPU state structure).
+  // NOTE: must NOT use ORIS(rd,0,...) — logical ops (ORIS/ORI) do NOT treat
+  // RA=0 as the value zero.  Only ADDI/ADDIS have that special case.
+  // Always zero rd via LI (ADDI rd,0,0) before building up with ORIS/ORI.
   u64 addr = reinterpret_cast<u64>(&m_ppc_state);
   if (addr > 0xFFFFFFFFULL)
   {
     u32 hi = static_cast<u32>(addr >> 32);
     u32 lo = static_cast<u32>(addr & 0xFFFFFFFF);
-    m_asm.ADDIS(REG_PPC_BASE, 0, static_cast<s32>(hi >> 16));
+    m_asm.LI(REG_PPC_BASE, 0);
+    m_asm.ORIS(REG_PPC_BASE, REG_PPC_BASE, static_cast<u32>(hi >> 16));
     m_asm.ORI(REG_PPC_BASE, REG_PPC_BASE, hi & 0xFFFF);
-    m_asm.RLDICR(REG_PPC_BASE, REG_PPC_BASE, 32, 31);  // keep upper 32 bits (me=31)
+    m_asm.RLDICL(REG_PPC_BASE, REG_PPC_BASE, 32, 0);
     m_asm.ORIS(REG_PPC_BASE, REG_PPC_BASE, static_cast<u32>(lo >> 16));
     m_asm.ORI(REG_PPC_BASE, REG_PPC_BASE, lo & 0xFFFF);
   }
   else
   {
-    m_asm.ADDIS(REG_PPC_BASE, 0, static_cast<s32>(addr >> 16));
+    m_asm.LI(REG_PPC_BASE, 0);
+    m_asm.ORIS(REG_PPC_BASE, REG_PPC_BASE, static_cast<u32>(addr >> 16));
     m_asm.ORI(REG_PPC_BASE, REG_PPC_BASE, static_cast<u32>(addr & 0xFFFF));
   }
 
@@ -552,6 +561,11 @@ void JitPPC64::EmitProlog()
   // Reset CA tracking — CA value is unknown at block entry
   m_ca_known = false;
   m_ca_value = 0;
+  m_ca_in_r0 = false;
+  m_ca_dirty = false;
+
+  // Reset CR0 caching — native CR0 may be stale from previous block/interpreter
+  m_cr0_native_valid = false;
 
   // Sync guest rounding mode to host FPSCR at block entry.
   // On PPC970 the guest and host share the same FPSCR, but the
@@ -588,12 +602,14 @@ void JitPPC64::WriteExit(u32 destination, bool bl, u32 after)
 {
   gpr.Flush(js.op);
   fpr.Flush(js.op);
+  FlushCarry();
+  FlushCR0IfDirty();
 
   // Subtract block's estimated instruction count from downcount
-  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
-  // SUBFIC does sim - ra (backwards!), so use ADDI with negative immediate
-  m_asm.ADDI(REG_SCRATCH, REG_SCRATCH, -static_cast<s32>(js.downcountAmount));
-  m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  // Use r11 (REG_SCRATCH2), not r0 — PPC addi with RA=0 uses literal 0.
+  m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, -static_cast<s32>(js.downcountAmount));
+  m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
 
   JustWriteExit(destination, bl, after);
 }
@@ -648,15 +664,16 @@ void JitPPC64::JustWriteExit(u32 destination, bool bl, u32 after)
     else
     {
       m_asm.LI32(REG_SCRATCH, static_cast<u32>(feature_flags));
-      m_asm.RLDICR(REG_SCRATCH, REG_SCRATCH, 32, 31);  // ff << 32
+      m_asm.RLDICL(REG_SCRATCH, REG_SCRATCH, 32, 0);   // ff << 32
       m_asm.ORIS(REG_SCRATCH, REG_SCRATCH, static_cast<u16>(after >> 16));
       m_asm.ORI(REG_SCRATCH, REG_SCRATCH, static_cast<u16>(after));
     }
 
     // --- Increment BLR stack depth counter ---
-    m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(BLR_DEPTH_OFFSET));
-    m_asm.ADDI(REG_SCRATCH, REG_SCRATCH, 1);
-    m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(BLR_DEPTH_OFFSET));
+    // Use r11 — PPC addi with RA=0 uses literal 0.
+    m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(BLR_DEPTH_OFFSET));
+    m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, 1);
+    m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(BLR_DEPTH_OFFSET));
 
     // Recompute guest_val (r0 was clobbered by the counter increment)
     if (feature_flags == 0)
@@ -666,7 +683,7 @@ void JitPPC64::JustWriteExit(u32 destination, bool bl, u32 after)
     else
     {
       m_asm.LI32(REG_SCRATCH, static_cast<u32>(feature_flags));
-      m_asm.RLDICR(REG_SCRATCH, REG_SCRATCH, 32, 31);
+      m_asm.RLDICL(REG_SCRATCH, REG_SCRATCH, 32, 0);
       m_asm.ORIS(REG_SCRATCH, REG_SCRATCH, static_cast<u16>(after >> 16));
       m_asm.ORI(REG_SCRATCH, REG_SCRATCH, static_cast<u16>(after));
     }
@@ -728,6 +745,8 @@ void JitPPC64::WriteExceptionExit(u32 destination)
 {
   gpr.Flush(js.op);
   fpr.Flush(js.op);
+  FlushCarry();
+  FlushCR0IfDirty();
 
   // Store destination to pc (CheckExceptionsFromJIT reads pc)
   m_asm.LI32(REG_SCRATCH, destination);
@@ -814,6 +833,8 @@ void JitPPC64::WriteIdleExit()
 {
   gpr.Flush(js.op);
   fpr.Flush(js.op);
+  FlushCarry();
+  FlushCR0IfDirty();
 
   // Set downcount to 0 (triggers idle detection in Run())
   m_asm.LI(REG_SCRATCH, 0);
@@ -852,6 +873,8 @@ void JitPPC64::WriteBLRExit()
     // No optimization: read LR from SPR and dispatch
     gpr.Flush(js.op);
     fpr.Flush(js.op);
+    FlushCarry();
+    FlushCR0IfDirty();
     m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE,
               static_cast<s32>(SPR_OFFSET + 4 * 8));  // r0 = SPR_LR
     m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 29); // mask to 30 bits
@@ -869,16 +892,19 @@ void JitPPC64::WriteBLRExit()
 
   gpr.Flush(js.op);
   fpr.Flush(js.op);
+  FlushCarry();
+  FlushCR0IfDirty();
 
   // Check BLR stack depth: if 0, skip pop and go to slow path
-  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(BLR_DEPTH_OFFSET));
-  m_asm.CMPWI(0, REG_SCRATCH, 0);
+  // Use r11 — PPC addi with RA=0 uses literal 0.
+  m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(BLR_DEPTH_OFFSET));
+  m_asm.CMPWI(0, REG_SCRATCH2, 0);
   const u8* beq_empty_pos = m_asm.Code() + m_asm.Size();
   m_asm.BC(12, 2, 0);   // BEQ → patch to slow path later
 
   // Decrement counter
-  m_asm.ADDI(REG_SCRATCH, REG_SCRATCH, -1);
-  m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(BLR_DEPTH_OFFSET));
+  m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, -1);
+  m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(BLR_DEPTH_OFFSET));
 
   // Pop BLR entry: r11 = guest_val, r0 = host_ret_addr; SP += 16
   m_asm.LD(REG_SCRATCH2, REG_SP, 0);   // r11 = guest_val  (ff<<32 | ppc_pc)
@@ -906,7 +932,7 @@ void JitPPC64::WriteBLRExit()
     // Need another register. Use stack temporarily.
     // Simpler: reconstruct expected value from runtime LR + compile-time ff
     m_asm.LI32(REG_PHYS_BASE, static_cast<u32>(feature_flags));
-    m_asm.RLDICR(REG_PHYS_BASE, REG_PHYS_BASE, 32, 31);  // r13 = ff << 32
+    m_asm.RLDICL(REG_PHYS_BASE, REG_PHYS_BASE, 32, 0);   // r13 = ff << 32
     m_asm.OR(REG_PHYS_BASE, REG_PHYS_BASE, REG_SCRATCH); // r13 = (ff<<32) | LR
     // Now compare guest_val (saved to r10) with r13
     m_asm.CMPD(0, 10, REG_PHYS_BASE);
@@ -927,9 +953,10 @@ void JitPPC64::WriteBLRExit()
   // ============================================
 
   // Downcount
-  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
-  m_asm.ADDI(REG_SCRATCH, REG_SCRATCH, -static_cast<s32>(js.downcountAmount));
-  m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  // Use r11 — PPC addi with RA=0 uses literal 0.
+  m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, -static_cast<s32>(js.downcountAmount));
+  m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
 
   // Restore REG_PHYS_BASE (may have been clobbered by feature_flags path)
   if (feature_flags != 0)
@@ -956,10 +983,19 @@ void JitPPC64::WriteBLRExit()
   m_asm.LD(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(STACK_PTR_OFFSET));
   m_asm.MR(REG_SP, REG_SCRATCH);
 
+  // Re-create dispatcher frame: load return_to_Run_addr from the old
+  // dispatcher frame at SP-16 (preserved since enter_code created it —
+  // nothing overwrites it because all block frames are below SP-32).
+  m_asm.LD(REG_SCRATCH, REG_SP, -16);
+  m_asm.STDU(REG_SP, REG_SP, -32);
+  m_asm.STD(REG_SCRATCH, REG_SP, 16);
+  m_asm.STD(10, REG_SP, 24);
+
   // Downcount
-  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
-  m_asm.ADDI(REG_SCRATCH, REG_SCRATCH, -static_cast<s32>(js.downcountAmount));
-  m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  // Use r11 — PPC addi with RA=0 uses literal 0.
+  m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, -static_cast<s32>(js.downcountAmount));
+  m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
 
   // Read LR from SPR and dispatch
   m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE,
@@ -967,14 +1003,11 @@ void JitPPC64::WriteBLRExit()
   m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 29);
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
 
-  auto* b = js.curBlock;
-  JitBlock::LinkData linkData;
-  linkData.exitAddress = js.compilerPC;
-  linkData.linkStatus = false;
-  linkData.call = false;
-  linkData.exitPtrs = m_asm.Code() + m_asm.Size();
-  m_asm.BRel(m_dispatcher_lite);
-  b->linkData.push_back(linkData);
+  // Enter dispatcher_entry (re-enters the normal dispatch loop with
+  // a valid dispatcher frame — no block frame exists after ResetStack,
+  // so dispatcher_lite is not usable).
+  // No linkData recorded — this exit is runtime-dynamic (depends on LR).
+  m_asm.BRel(m_dispatcher_entry);
 
   // Patch both branches to the slow path:
   //   beq_empty_pos — taken when counter == 0 (stack empty)
@@ -1024,7 +1057,7 @@ void JitPPC64::FakeLKExit(u32 after)
   else
   {
     m_asm.LI32(REG_SCRATCH, static_cast<u32>(feature_flags));
-    m_asm.RLDICR(REG_SCRATCH, REG_SCRATCH, 32, 31);
+    m_asm.RLDICL(REG_SCRATCH, REG_SCRATCH, 32, 0);
     m_asm.ORIS(REG_SCRATCH, REG_SCRATCH, static_cast<u16>(after >> 16));
     m_asm.ORI(REG_SCRATCH, REG_SCRATCH, static_cast<u16>(after));
   }
@@ -1109,6 +1142,87 @@ void JitPPC64::UpdateRoundingMode()
 }
 
 // ===========================================================================
+// FlushCR0IfDirty — synchronize host CR0 with ppcState.cr[0]
+//
+// If native CR0 was set by CMPWI (m_cr0_native_valid), CR0[LT,GT,EQ] is
+// correct but CR0[SO] may have a stale host value.  We read the host CR,
+// fix CR0[SO] from the guest XER_SO, and write CR0 back.
+//
+// If CR0 was never modified by a JIT RC-bit op (not native valid), the
+// host CR0 still has the value from the last block's epilog or interpreter,
+// which matches ppcState.cr[0] — nothing to do.
+//
+// Clobbers: r0 (REG_SCRATCH), r11 (REG_SCRATCH2)
+// ===========================================================================
+
+void JitPPC64::FlushCR0IfDirty()
+{
+  if (!m_cr0_native_valid)
+    return;
+
+  m_asm.MFCR(REG_SCRATCH2);
+  m_asm.LBZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(XER_SO_OV_OFFSET));
+  m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 30, 30);   // SO bit → u32 bit 30
+  m_asm.RLWIMI(REG_SCRATCH2, REG_SCRATCH, 27, 3, 3);   // insert at CR0[SO] pos
+  m_asm.MTCRF(0x01, REG_SCRATCH2);
+  // After flush, native CR0 IS correct (including SO).  The next CMPWI
+  // will overwrite CR0[LT,GT,EQ] but preserve SO — so we keep valid=true.
+}
+
+// ===========================================================================
+// FlushCarry — if CA is dirty in REG_SCRATCH, store to ppcState.xer_ca
+// Clobbers: nothing (REG_SCRATCH already holds CA if dirty)
+// ===========================================================================
+
+void JitPPC64::FlushCarry()
+{
+  if (m_ca_dirty)
+  {
+    m_asm.STB(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(XER_CA_OFFSET));
+    m_ca_dirty = false;
+    m_ca_in_r0 = false;  // ppcState now holds the value, not r0
+  }
+  else if (m_ca_known && !m_ca_in_r0)
+  {
+    // CA is a known constant that was never computed in a host register
+    // but might still need storing if it was SET in this block.
+    // Actually, if m_ca_known=true and !m_ca_dirty, the value was known
+    // at block entry (reset to false in EmitProlog) or set by addic with
+    // simm=0 followed by FlushCarry.  In either case, ppcState is already
+    // correct.  Nothing to do.
+  }
+}
+
+// ===========================================================================
+// FlushAll — flush everything before a C call or block exit
+// ===========================================================================
+
+void JitPPC64::FlushAll()
+{
+  gpr.Flush();
+  fpr.Flush();
+  FlushCarry();
+  FlushCR0IfDirty();
+}
+
+// ===========================================================================
+// PrepareCall — flush guest state before calling C++ from JIT code
+//
+// Saves all dirty registers (GPR, FPR, carry, CR0) to ppcState so the
+// C++ function finds a consistent guest state.  After the call, the
+// compiler should reload r12 (REG_PPC_BASE) if the C function may have
+// relocated ppcState.
+// ===========================================================================
+
+void JitPPC64::PrepareCall()
+{
+  gpr.Flush();
+  fpr.Flush();
+  FlushCarry();
+  FlushCR0IfDirty();
+}
+
+// ===========================================================================
 // CR0 update (for RC-bit instructions)
 // Clobbers r0, r11
 // ===========================================================================
@@ -1117,11 +1231,10 @@ void JitPPC64::EmitCR0Update(u32 host_reg)
 {
   m_asm.EXTSW(REG_SCRATCH2, host_reg);
   m_asm.CMPWI(0, REG_SCRATCH2, 0);
-  m_asm.MFCR(REG_SCRATCH2);
-  m_asm.LBZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(XER_SO_OV_OFFSET));
-  m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 30, 30);
-  m_asm.RLWIMI(REG_SCRATCH2, REG_SCRATCH, 27, 3, 3);
-  m_asm.MTCRF(0x01, REG_SCRATCH2);  // mask 0x01 = CR field 0
+  // CR0[LT,GT,EQ] now correct in host CR.  CR0[SO] is preserved from the
+  // last flush.  The full MFCR+LBZ+RLWINM+RLWIMI+MTCRF sequence is deferred
+  // to FlushCR0IfDirty() — needed only on mfcr/mtcrf/mcrf/bc(bi=3)/block exit.
+  m_cr0_native_valid = true;
 }
 
 // ===========================================================================
@@ -1387,6 +1500,12 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
   m_constant_propagation.Clear();
   ResetFPRTypes();
 
+  // Initialize GQR tracking from block analysis.
+  // GQR values known at compile time are set from the instruction stream;
+  // m_gqr_known[i] is set/cleared by mtspr/gqrs in the compiler.
+  for (auto& g : m_gqr_known)
+    g = false;
+
   js.downcountAmount = 0;
 
   for (u32 i = 0; i < code_block.m_num_instructions; ++i)
@@ -1535,9 +1654,35 @@ void JitPPC64::EraseSingleBlock(const JitBlock& block)
   m_block_cache.EraseSingleBlock(block);
 }
 
-std::vector<JitBase::MemoryStats> JitPPC64::GetMemoryStats() const { return {}; }
-std::size_t JitPPC64::DisassembleNearCode(const JitBlock& block, std::ostream& stream) const { return 0; }
-std::size_t JitPPC64::DisassembleFarCode(const JitBlock& block, std::ostream& stream) const { return 0; }
+std::vector<JitBase::MemoryStats> JitPPC64::GetMemoryStats() const
+{
+  const std::size_t near_free = static_cast<std::size_t>(m_code_end - m_code_pos);
+  const std::size_t main_size = static_cast<std::size_t>(m_code_end - m_code_region);
+  return {{"near", {near_free, 1.0 - static_cast<double>(near_free) / main_size}}};
+}
+
+std::size_t JitPPC64::DisassembleNearCode(const JitBlock& block, std::ostream& stream) const
+{
+  // Dump host PPC64 instructions of the compiled JIT block
+  const u8* start = block.near_begin;
+  const u8* end = block.near_end;
+  std::size_t count = 0;
+  for (const u8* p = start; p < end; p += 4)
+  {
+    u32 insn = 0;
+    std::memcpy(&insn, p, sizeof(insn));
+    stream << fmt::format("  [{:04x}] {:08x}\n",
+                          static_cast<u32>(p - start), insn);
+    ++count;
+  }
+  return count;
+}
+
+std::size_t JitPPC64::DisassembleFarCode(const JitBlock& block, std::ostream& stream) const
+{
+  // No far code section in JITPPC64 currently
+  return 0;
+}
 
 bool JitPPC64::CompileTable31(UGeckoInstruction inst)
 {
@@ -1695,6 +1840,56 @@ bool JitPPC64::IsFPRStoreSafe(u32 guest_fpr) const
   //
   // Uncached guest FPRs don't need storing (they're already in ppcState).
   return true;
+}
+
+
+// ===========================================================================
+// Branch watch — emit profiling counter increments
+// ===========================================================================
+//
+// When IsBranchWatchEnabled() is true, each branch site calls EmitBranchCounter
+// which increments a 64-bit counter stored in the trampoline region.
+// The counter address is loaded via LI32, followed by LD/ADDI/STD.
+// ===========================================================================
+
+void JitPPC64::EmitBranchCounter()
+{
+  if (!IsBranchWatchEnabled())
+    return;
+  if (!m_branch_counters_base)
+    return;
+
+  u64* counter_addr = reinterpret_cast<u64*>(m_branch_counters_base) +
+                      m_branch_counters_used;
+
+  // Load counter address (r0), load value (r11), increment, store back.
+  m_asm.LI32(REG_SCRATCH, static_cast<u32>(reinterpret_cast<uintptr_t>(counter_addr)));
+  m_asm.LD(REG_SCRATCH2, REG_SCRATCH, 0);
+  m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, 1);
+  m_asm.STD(REG_SCRATCH2, REG_SCRATCH, 0);
+
+  m_branch_counters_used++;
+}
+
+// ===========================================================================
+// GenerateAsmRoutines — emit helper code sequences
+// ===========================================================================
+//
+// These are fused instruction sequences for common operations, placed in the
+// code region after the dispatcher.  They are called via BRel from JIT
+// blocks for operations too complex or large to inline.
+// ===========================================================================
+
+void JitPPC64::GenerateAsmRoutines()
+{
+  // For now, only emit placeholders — the most common psq paths (type 0 = float)
+  // are inlined in CompilePairedLoadStore.
+  m_asm_routines.psq_float_load = nullptr;
+  m_asm_routines.psq_float_store = nullptr;
+  m_asm_routines.psq_u16_load = nullptr;
+  m_asm_routines.psq_u16_store = nullptr;
+  m_asm_routines.psq_s16_load = nullptr;
+  m_asm_routines.psq_s16_store = nullptr;
 }
 
 // ===========================================================================

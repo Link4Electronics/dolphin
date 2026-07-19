@@ -126,9 +126,6 @@ struct PowerPCState
   // Storage for the stack pointer of the BLR optimization.
   u8* stored_stack_pointer = nullptr;
 
-  // BLR return-address stack depth counter (JITPPC64 only, always 0 for interpreter).
-  u32 blr_stack_depth = 0;
-
   // gather pipe pointer for JIT access
   u8* gather_pipe_ptr = nullptr;
   u8* gather_pipe_base_ptr = nullptr;
@@ -178,6 +175,9 @@ struct PowerPCState
 
   alignas(16) PairedSingle ps[32];
 #endif
+
+  // BLR return-address stack depth counter (JITPPC64 only, always 0 for interpreter).
+  u32 blr_stack_depth = 0;
 
   std::array<u32, 16> sr{};  // Segment registers.
 

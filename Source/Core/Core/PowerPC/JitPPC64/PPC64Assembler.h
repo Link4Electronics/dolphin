@@ -33,13 +33,28 @@ public:
   void ADDIS(u32 rd, u32 ra, s32 sim) { Write32(D(15, rd, ra, sim)); }
   void ADDI(u32 rd, u32 ra, s32 sim) { Write32(D(14, rd, ra, sim)); }
   void LI(u32 rd, s32 sim) { ADDI(rd, 0, sim); }
-  // Load 32-bit zero-extended value into rd using ORIS/ORI (no sign extension).
-  // Always 2 instructions, works for all 32-bit values even when ADDI/LIS would
-  // sign-extend (e.g. 0xFF00 becomes 0xFFFFFFFFFF00 with ADDI on PPC64).
+  // Load 32-bit zero-extended value into rd (no sign extension).
+  // Works for all 32-bit values including 0x8000+ (unlike ADDI/LI which
+  // sign-extend and corrupt upper 32 bits).
+  // NOTE: Must NOT use ORIS(rd,0,...) because logical ops (ORI/ORIS) use
+  // GPR[0] literally — they do NOT treat RA=0 as the value zero.
+  // Instead, zero rd via LI(rd,0) (ADDI treats RA=0 as the value zero)
+  // then build up with ORIS/ORI using rd as source.
   void LI32(u32 rd, u32 value)
   {
-    ADDIS(rd, 0, static_cast<s32>(value >> 16));
-    ORI(rd, rd, value & 0xFFFF);
+    u32 hi = value >> 16;
+    u32 lo = value & 0xFFFF;
+    LI(rd, 0);              // rd = 0  (ADDI ra=0 → zero)
+    if (hi != 0)
+    {
+      ORIS(rd, rd, hi);     // rd = hi << 16
+      if (lo != 0)
+        ORI(rd, rd, lo);    // rd = (hi << 16) | lo
+    }
+    else if (lo != 0)
+    {
+      ORI(rd, rd, lo);      // rd = lo
+    }
   }
   void SUBF(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 40, rc)); }
   void SUBFC(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 8, rc)); }
@@ -287,33 +302,51 @@ public:
   void STDX(u32 rs, u32 ra, u32 rb) { Write32(X(31, rs, ra, rb, 149, false)); }
   void STDUX(u32 rs, u32 ra, u32 rb) { Write32(X(31, rs, ra, rb, 181, false)); }
 
+  // rldic RA, RS, SH, MB — rotate left double immediate and clear (inserts at MB)
+  // MD-form: opcd=30, xo=010 at u32 bits 3:1 (PPC bits 28-30)
+  //   Same field layout as rldicl/rldicr; mb field defines mask left boundary.
+  //   Rotate left by SH, then insert into mask MB..MB+SH-1 from rotated value.
+  //   Used for half-swap: rldic rd, rd, 32, 0  (swap upper/lower 32 bits)
+  void RLDIC(u32 ra, u32 rs, u32 sh, u32 mb, bool rc = false)
+  {
+    Write32((30u << 26) | ((rs & 0x1F) << 21) | ((ra & 0x1F) << 16) |
+            ((sh & 0x1F) << 11) | (((sh >> 5) & 1) << 10) |
+            ((mb & 0x1F) << 5) | (((mb >> 5) & 1) << 4) |
+            (2u << 1) | (rc ? 1u : 0u));
+  }
+
   // rldicr RA, RS, SH, ME — rotate left double immediate and clear right
-  // MD-form: opcd=30, xo=1 at PPC bits 27-30 (= u32 bits 4:1 = 0b0001)
+  // MD-form: opcd=30, xo=001 at u32 bits 3:1 (PPC bits 28-30)
   //   u31-u26: opcd=30, u25-21: RS, u20-16: RA,
   //   u15-u11: sh[4:0], u10: sh[5],
   //   u9-u5: me[4:0], u4: me[5],
-  //   u4-u1: xo (4-bit, 0001=rldicr, 0000=rldicl), u0: Rc
+  //   u3-u1: xo (3-bit, 001=rldicr), u0: Rc
   void RLDICR(u32 ra, u32 rs, u32 sh, u32 me, bool rc = false)
   {
     Write32((30u << 26) | ((rs & 0x1F) << 21) | ((ra & 0x1F) << 16) |
             ((sh & 0x1F) << 11) | (((sh >> 5) & 1) << 10) |
             ((me & 0x1F) << 5) | (((me >> 5) & 1) << 4) |
-             (1u << 1) | (rc ? 1u : 0u));
+            (1u << 1) | (rc ? 1u : 0u));
   }
 
-  // rldicl RA, RS, SH, MB — clear left bits (e.g., rldicl rd, rs, 0, 32 = zero-extend 32-bit)
-  // MD-form: opcd=30, xo=0 at PPC bits 27-30 (= u32 bits 4:1 = 0b0000)
+  // rldicl RA, RS, SH, MB — rotate left double immediate and clear left
+  // MD-form: opcd=30, xo=000 at u32 bits 3:1 (PPC bits 28-30)
+  //   u31-u26: opcd=30, u25-21: RS, u20-16: RA,
+  //   u15-u11: sh[4:0], u10: sh[5],
+  //   u9-u5: mb[4:0], u4: mb[5],
+  //   u3-u1: xo (3-bit field, 000=rldicl), u0: Rc
   void RLDICL(u32 ra, u32 rs, u32 sh, u32 mb, bool rc = false)
   {
     Write32((30u << 26) | ((rs & 0x1F) << 21) | ((ra & 0x1F) << 16) |
             ((sh & 0x1F) << 11) | (((sh >> 5) & 1) << 10) |
             ((mb & 0x1F) << 5) | (((mb >> 5) & 1) << 4) |
-            (0u << 2) | (rc ? 1u : 0u));
+            (0u << 1) | (rc ? 1u : 0u));
   }
 
   // Zero-extend 32-bit: rldicl rd, rs, 0, 32  (clear upper 32 bits)
   void CLRLDI(u32 ra, u32 rs, u32 mb) { RLDICL(ra, rs, 0, mb); }
-  void CLR32(u32 rd, u32 rs) { RLDICL(rd, rs, 0, 32); }
+  // Zero-extend 32-bit: rlwinm rd, rs, 0, 0, 31  (clears upper 32 bits on PPC64)
+  void CLR32(u32 rd, u32 rs) { RLWINM(rd, rs, 0, 0, 31); }
 
   // -- Branch / SPR moves --
   // mtspr 9, rs  — move to CTR (SPR=9)
@@ -333,20 +366,48 @@ public:
   // -- Move Register (OR rS, rS, rT → rA = rS) --
   void MR(u32 ra, u32 rs) { OR(ra, rs, rs); }
 
-  // Load 64-bit immediate into rd (6 instructions, no sign-extension issues).
-  // Uses existing assembler methods: lis + clrldi + ori + sldi + oris + ori
+  // Load 64-bit immediate into rd (2-7 instructions depending on size).
+  // NOTE: Must NOT use ORIS(rd,0,...) or ORI(rd,0,...) — logical ops use
+  // GPR[0] literally, they don't treat RA=0 as the value zero (only ADDI does).
   void MOVI64(u32 rd, u64 imm)
   {
-    const auto hi = static_cast<s32>((imm >> 48) & 0xFFFF);
-    const auto h3 = static_cast<u32>((imm >> 32) & 0xFFFF);
-    const auto h2 = static_cast<u32>((imm >> 16) & 0xFFFF);
-    const auto lo = static_cast<u32>(imm & 0xFFFF);
-    ADDIS(rd, 0, hi);
-    RLDICL(rd, rd, 0, 32);
-    ORI(rd, rd, h3);
-    RLDICR(rd, rd, 32, 31);
-    ORIS(rd, rd, h2);
-    ORI(rd, rd, lo);
+    if (imm > 0xFFFFFFFFULL)
+    {
+      // 64-bit or 48-bit: split into two 32-bit halves
+      const u32 hi = static_cast<u32>(imm >> 32);
+      const u32 lo_val = static_cast<u32>(imm & 0xFFFFFFFFULL);
+      LI(rd, 0);                    // rd = 0  (ADDI ra=0 → zero)
+      ORIS(rd, rd, hi >> 16);       // rd |= (hi >> 16) << 16
+      if (hi & 0xFFFF)
+        ORI(rd, rd, hi & 0xFFFF);  // rd = hi (low 32 bits)
+      RLDICL(rd, rd, 32, 0);       // rd = hi << 32
+      ORIS(rd, rd, lo_val >> 16);  // rd |= (lo_val >> 16) << 16
+      if (lo_val & 0xFFFF)
+        ORI(rd, rd, lo_val & 0xFFFF); // rd = (hi << 32) | lo_val
+    }
+    else if ((imm >> 16) != 0)
+    {
+      // 32-bit value with non-zero upper half
+      const u32 v = static_cast<u32>(imm);
+      LI(rd, 0);
+      ORIS(rd, rd, v >> 16);
+      if (v & 0xFFFF)
+        ORI(rd, rd, v & 0xFFFF);
+    }
+    else if (imm & 0x8000)
+    {
+      // 16-bit value with MSB set (ADDI would sign-extend)
+      LI(rd, 0);
+      ORI(rd, rd, static_cast<u32>(imm));
+    }
+    else if (imm != 0)
+    {
+      LI(rd, static_cast<s32>(imm));   // ADDI rd, 0, imm — safe since imm < 0x8000
+    }
+    else
+    {
+      LI(rd, 0);                        // imm == 0
+    }
   }
   void VADDFP(u32 vd, u32 va, u32 vb) { Write32(AV_VA(4, vd, va, vb, 26)); }
   void VSUBFP(u32 vd, u32 va, u32 vb) { Write32(AV_VA(4, vd, va, vb, 28)); }

@@ -34,12 +34,19 @@ void JitPPC64::EmitCRCheck(u32 bi, bool cr_true)
 {
   const u32 field_idx = bi >> 2;
 
-  // Fast path: CR0 (bi 0-3) — native BC is correct
+  // Fast path: CR0 (bi 0-3) — native BC is correct when m_cr0_native_valid
   if (field_idx == 0)
   {
-    m_asm.BC(cr_true ? 12u : 4u, bi, 8);
-    m_asm.ADDI(10, 0, 1);
-    return;
+    if (bi != 3 && m_cr0_native_valid)
+    {
+      // CR0[LT,GT,EQ] is correct in host CR from the last RC-bit CMPWI.
+      // Native BC reads it directly.  CR0[SO] (bi=3) is NOT safe without
+      // flush — defer to ppcState load below.
+      m_asm.BC(cr_true ? 12u : 4u, bi, 8);
+      m_asm.ADDI(10, 0, 1);
+      return;
+    }
+    // Fall through to ppcState load for stale CR0 or bi=3 (SO)
   }
 
   // Load ppcState.cr.fields[field_idx]
@@ -96,6 +103,8 @@ bool JitPPC64::CompileB(UGeckoInstruction inst)
   s32 li = static_cast<s32>(inst.LI << 8) >> 6;
   u32 target = inst.AA ? static_cast<u32>(li) : (js.compilerPC + 4) + li;
 
+  EmitBranchCounter();
+
   if (inst.LK)
   {
     u32 lr_value = js.compilerPC + 4;
@@ -130,8 +139,12 @@ bool JitPPC64::CompileBC(UGeckoInstruction inst)
   const bool skip_ctr_check = (bo & 4) != 0;        // bit 2
   const bool ctr_eq_zero = (bo & 2) != 0;           // bit 1
 
+  EmitBranchCounter();
+
   gpr.Flush(js.op);
   fpr.Flush(js.op);
+  FlushCarry();
+  FlushCR0IfDirty();
 
   const s32 bd = static_cast<s32>(inst.BD << 16) >> 14;
   const u32 target = inst.AA ? static_cast<u32>(bd) : (js.compilerPC + 4) + bd;
@@ -204,13 +217,23 @@ bool JitPPC64::CompileBC(UGeckoInstruction inst)
 
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
 
-  // Decrement downcount (ADDI with negative immediate, NOT SUBFIC)
-  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
-  m_asm.ADDI(REG_SCRATCH, REG_SCRATCH, -static_cast<s32>(js.downcountAmount));
-  m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  // Decrement downcount — must use r11 (REG_SCRATCH2), NOT r0 (REG_SCRATCH).
+  // On PPC, addi rD, 0, SI means rD = 0 + SI (RA=0 → source is literal zero).
+  // So addi r0, r0, -N produces -N, discarding the LWZ result.
+  m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, -static_cast<s32>(js.downcountAmount));
+  m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
 
-  // Jump to dispatcher_lite (can't link conditional branches — dynamic target)
+  // Jump to dispatcher_lite — record linkData so WriteLinkBlock can patch
+  // this BRel to jump directly to the destination block once it's compiled.
+  // Target is static (known at compile time), so linking is valid.
+  JitBlock::LinkData linkData;
+  linkData.exitAddress = target;
+  linkData.linkStatus = false;
+  linkData.call = false;
+  linkData.exitPtrs = m_asm.Code() + m_asm.Size();
   m_asm.BRel(m_dispatcher_lite);
+  js.curBlock->linkData.push_back(linkData);
   return true;
 }
 
@@ -242,7 +265,16 @@ bool JitPPC64::CompileOPCD19(UGeckoInstruction inst)
 
 bool JitPPC64::CompileMCRF(UGeckoInstruction inst)
 {
+  // If reading from CR0 (CRFS==0), its host value must be flushed first.
+  if (inst.CRFS == 0)
+    FlushCR0IfDirty();
+
   m_asm.MCRF(inst.CRFD, inst.CRFS);
+
+  // If writing to CR0 (CRFD==0), the copied value is correct in the host CR.
+  if (inst.CRFD == 0)
+    m_cr0_native_valid = true;
+
   return true;
 }
 
@@ -252,18 +284,28 @@ bool JitPPC64::CompileMCRF(UGeckoInstruction inst)
 
 bool JitPPC64::CompileCRLogical(UGeckoInstruction inst)
 {
+  // Any operand in CR0 (bits 0-3) requires a flush first.
+  const u32 bd = inst.CRBD, ba = inst.CRBA, bb = inst.CRBB;
+  if (bd < 4 || ba < 4 || bb < 4)
+    FlushCR0IfDirty();
+
   switch (inst.SUBOP10)
   {
-  case 33:   m_asm.CRNOR(inst.CRBD, inst.CRBA, inst.CRBB); break;
-  case 129:  m_asm.CRANDC(inst.CRBD, inst.CRBA, inst.CRBB); break;
-  case 193:  m_asm.CRXOR(inst.CRBD, inst.CRBA, inst.CRBB); break;
-  case 225:  m_asm.CRNAND(inst.CRBD, inst.CRBA, inst.CRBB); break;
-  case 257:  m_asm.CRAND(inst.CRBD, inst.CRBA, inst.CRBB); break;
-  case 289:  m_asm.CREQV(inst.CRBD, inst.CRBA, inst.CRBB); break;
-  case 417:  m_asm.CRORC(inst.CRBD, inst.CRBA, inst.CRBB); break;
-  case 449:  m_asm.CROR(inst.CRBD, inst.CRBA, inst.CRBB); break;
+  case 33:   m_asm.CRNOR(bd, ba, bb); break;
+  case 129:  m_asm.CRANDC(bd, ba, bb); break;
+  case 193:  m_asm.CRXOR(bd, ba, bb); break;
+  case 225:  m_asm.CRNAND(bd, ba, bb); break;
+  case 257:  m_asm.CRAND(bd, ba, bb); break;
+  case 289:  m_asm.CREQV(bd, ba, bb); break;
+  case 417:  m_asm.CRORC(bd, ba, bb); break;
+  case 449:  m_asm.CROR(bd, ba, bb); break;
   default:   return false;
   }
+
+  // If the result goes into CR0, it's now correct in the host CR.
+  if (bd < 4)
+    m_cr0_native_valid = true;
+
   return true;
 }
 
@@ -281,8 +323,12 @@ bool JitPPC64::CompileBCLR(UGeckoInstruction inst)
   const bool skip_ctr_check = (bo & 4) != 0;        // bit 2
   const bool ctr_eq_zero = (bo & 2) != 0;           // bit 1
 
+  EmitBranchCounter();
+
   gpr.Flush(js.op);
   fpr.Flush(js.op);
+  FlushCarry();
+  FlushCR0IfDirty();
   const u32 next_pc = js.compilerPC + 4;
 
   // Unconditional: both CR and CTR checks skipped
@@ -301,9 +347,10 @@ bool JitPPC64::CompileBCLR(UGeckoInstruction inst)
       m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * 8));
       m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 29);
       m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
-      m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
-      m_asm.ADDI(REG_SCRATCH, REG_SCRATCH, -static_cast<s32>(js.downcountAmount));
-      m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+      // Use r11 for downcount — PPC addi with RA=0 uses literal 0.
+      m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+      m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, -static_cast<s32>(js.downcountAmount));
+      m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
       m_asm.BRel(m_dispatcher_lite);
     }
     else
@@ -361,9 +408,10 @@ bool JitPPC64::CompileBCLR(UGeckoInstruction inst)
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
 
   // Decrement downcount and jump to dispatcher_lite (dynamic target)
-  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
-  m_asm.ADDI(REG_SCRATCH, REG_SCRATCH, -static_cast<s32>(js.downcountAmount));
-  m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  // Use r11 (REG_SCRATCH2), not r0 — PPC addi with RA=0 uses literal 0.
+  m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, -static_cast<s32>(js.downcountAmount));
+  m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
   m_asm.BRel(m_dispatcher_lite);
   return true;
 }
@@ -383,8 +431,12 @@ bool JitPPC64::CompileBCCTR(UGeckoInstruction inst)
   // bcctr never decrements CTR (the assert in the interpreter verifies this,
   // and BO_DONT_DECREMENT_FLAG / skip_ctr_check must always be set).
 
+  EmitBranchCounter();
+
   gpr.Flush(js.op);
   fpr.Flush(js.op);
+  FlushCarry();
+  FlushCR0IfDirty();
   const u32 next_pc = js.compilerPC + 4;
 
   // LR save (LK=1) — skip when return is inlined
@@ -414,25 +466,27 @@ bool JitPPC64::CompileBCCTR(UGeckoInstruction inst)
 
     m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
 
-  // Decrement downcount and jump to dispatcher_lite (dynamic target)
-  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
-  m_asm.ADDI(REG_SCRATCH, REG_SCRATCH, -static_cast<s32>(js.downcountAmount));
-  m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
-  m_asm.BRel(m_dispatcher_lite);
-  return true;
-}
+    // Decrement downcount and jump to dispatcher_lite (dynamic target)
+    // Use r11 (REG_SCRATCH2), not r0 — PPC addi with RA=0 uses literal 0.
+    m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+    m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, -static_cast<s32>(js.downcountAmount));
+    m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+    m_asm.BRel(m_dispatcher_lite);
+    return true;
+  }
 
   // -----------------------------------------------------------------------
-  // 2. No CR check — unconditional bcctr/bcctrl
+  // 2. No CR check — unconditional bcctr/bcctrl (reachable when skip_cr_check)
   // -----------------------------------------------------------------------
   m_asm.MFSPR(REG_SCRATCH, 9);
   m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 29);
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
 
   // Decrement downcount and jump to dispatcher_lite (dynamic target)
-  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
-  m_asm.ADDI(REG_SCRATCH, REG_SCRATCH, -static_cast<s32>(js.downcountAmount));
-  m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  // Use r11 (REG_SCRATCH2), not r0 — PPC addi with RA=0 uses literal 0.
+  m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, -static_cast<s32>(js.downcountAmount));
+  m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
   m_asm.BRel(m_dispatcher_lite);
   return true;
 }

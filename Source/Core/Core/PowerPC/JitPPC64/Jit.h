@@ -1,7 +1,6 @@
 #pragma once
 
 #include <array>
-#include <map>
 #include <unordered_set>
 #include <vector>
 
@@ -13,18 +12,42 @@
 
 // Emit a 64-bit immediate load into a PPC64 assembler.
 // Used by EmitBackpatchRoutine and CompileMFTB to load function addresses.
+//
+// Builds from MSB to LSB using only ORI (zero-extending) + RLDICL(rd,rd,16,0).
+// ORIS/ADDIS sign-extend and corrupt upper bits when SI≥0x8000, so they are avoided.
 inline void TrampMOVI64(PPC64Assembler& asm_, u32 rd, u64 imm)
 {
-  const auto h4 = static_cast<s32>((imm >> 48) & 0xFFFF);
-  const auto h3 = static_cast<u32>((imm >> 32) & 0xFFFF);
-  const auto h2 = static_cast<u32>((imm >> 16) & 0xFFFF);
-  const auto lo = static_cast<u32>(imm & 0xFFFF);
-  asm_.ADDIS(rd, 0, h4);
-  asm_.RLDICL(rd, rd, 0, 32);
-  asm_.ORI(rd, rd, h3);
-  asm_.RLDICR(rd, rd, 32, 31);  // keep upper 32 bits (me=31): result = h3 << 32
-  asm_.ORIS(rd, rd, h2);
-  asm_.ORI(rd, rd, lo);
+  if (imm == 0)
+  {
+    asm_.LI(rd, 0);   // ADDI rd, 0, 0 = 0 (ADDI treats RA=0 as the value zero)
+    return;
+  }
+
+  // Find first non-zero 16-bit halfword from MSB side.
+  int start = 0;
+  if ((imm >> 48) != 0)
+    start = 3;
+  else if ((imm >> 32) != 0)
+    start = 2;
+  else
+    start = 1;
+
+  // Load first non-zero halfword.
+  // NOTE: must NOT use ORI(rd, 0, hw) because ORI/ORIS do NOT treat
+  // RA=0 as the value zero — they use GPR[0] literally.  Instead, zero
+  // rd via LI (ADDI ra=0 → zero) then ORI with rd as source.
+  u32 hw = static_cast<u32>((imm >> (start * 16)) & 0xFFFF);
+  asm_.LI(rd, 0);       // rd = 0  (ADDI treats RA=0 as zero)
+  asm_.ORI(rd, rd, hw); // rd = hw (zero-extended)
+
+  // Shift and OR each remaining halfword from MSB to LSB.
+  for (int i = start - 1; i >= 0; --i)
+  {
+    const u32 hw_i = static_cast<u32>((imm >> (i * 16)) & 0xFFFF);
+    asm_.RLDICL(rd, rd, 16, 0);
+    if (hw_i != 0)
+      asm_.ORI(rd, rd, hw_i);
+  }
 }
 
 // Forward declaration — defined in JitPPC64_Tables.cpp
@@ -231,9 +254,18 @@ private:
   void LoadCR(u32 host_reg);
   void StoreCR(u32 host_reg);
   void EmitCR0Update(u32 host_reg);
-  void EmitCarryFromReg();
   void EmitFakeTimeBase();
   void UpdateRoundingMode();
+
+  // ---- CR0 lazy caching helpers ----
+  void FlushCR0IfDirty();
+  void FlushAll();
+
+  // ---- Carry caching helpers ----
+  void FlushCarry();
+
+  // ---- Pre-call flush (gpr+fpr+carry+CR) ----
+  void PrepareCall();
 
 
 
@@ -332,10 +364,56 @@ private:
     u32& m_dirty_mask;
   };
 
-  // Carry (CA/XER) constant tracking within a block.
-  // When CA is known (e.g., after addic with imm=0), reads can skip LBZ from ppcState.
+  // Carry (CA/XER) tracking within a block.
+  // State machine:
+  //   m_ca_known=true  → compile-time known value in m_ca_value
+  //   m_ca_in_r0=true  → runtime value in REG_SCRATCH (r0), not yet stored
+  //   neither          → must LBZ from ppcState on first use
+  // m_ca_dirty=true when REG_SCRATCH differs from ppcState.xer_ca.
   bool m_ca_known = false;
   u32 m_ca_value = 0;
+  bool m_ca_in_r0 = false;
+  bool m_ca_dirty = false;
+
+  // CR0 lazy caching.
+  // After an RC-bit CMPWI, host CR0[LT,GT,EQ] is correct; CR0[SO] may be
+  // stale (from entry or last flush).  Native BC for CR0 (bi!=3) works
+  // without flushing.  mfcr/mtcrf/mcrf/bc_bi=3 require flush first.
+  bool m_cr0_native_valid = false;
+
+  // GQR tracking — most games use static GQR values known at compile time.
+  // When m_gqr_known[reg] is true, psq_l/st can use direct quantize code.
+  bool m_gqr_known[8] = {};
+  u32 m_gqr_values[8] = {};
+
+  // Asm routines (pre-generated helper sequences for quantized loads/stores,
+  // FRES/FRSQRTE optimization, etc.).
+  struct AsmRoutines
+  {
+    // For psq_l type 0 (float): converts GQR-format float to native single
+    // For type 2 (u16): called when inline U16 quantize is too large
+    // For type 3 (s16): same
+    // These are placeholders; only the most common type (float=0) has inline code.
+    const u8* psq_float_load = nullptr;
+    const u8* psq_float_store = nullptr;
+    const u8* psq_u16_load = nullptr;
+    const u8* psq_u16_store = nullptr;
+    const u8* psq_s16_load = nullptr;
+    const u8* psq_s16_store = nullptr;
+  };
+  AsmRoutines m_asm_routines;
+  void GenerateAsmRoutines();
+
+  // Branch watch (profiling counters)
+  // When enabled, each branch site increments a counter.
+  // Counters are stored in the trampoline region after the last slow path.
+  std::vector<u64*> m_branch_counters;
+  u8* m_branch_counters_base = nullptr;
+  u32 m_branch_counters_used = 0;
+  // Emit a branch counter increment at the current position (if watch enabled)
+  void EmitBranchCounter();
+
+  // Branch watch uses IsBranchWatchEnabled() from JitBase.
 
   // JIT code buffer
   u8* m_code_region = nullptr;
@@ -348,13 +426,13 @@ private:
   // Dispatcher entry point (for block exit linking)
   const u8* m_dispatcher_entry = nullptr;
 
-  // Dispatcher lite (no frame) for block linking fallback
+  // Dispatcher lite for block linking fallback; SP = block_SP on entry
   const u8* m_dispatcher_lite = nullptr;
 
-  // Shared exit sequence: restores host regs, tears down frame, BLR to Run().
-  // Both the epilog and branch compilers branch here instead of inline BLR,
-  // ensuring r10/r14-r31 are always restored and the frame is always torn down.
-  const u8* m_exit_sequence = nullptr;
+  // Dispatcher exit: restores callee-saved host regs from block frame,
+  // tears down the frame, and returns to Run().
+  // Called from m_dispatcher_lite when downcount ≤ 0 or block not found.
+  const u8* m_dispatcher_exit = nullptr;
 
 public:
   // Register usage in compiled code:

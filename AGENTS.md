@@ -448,13 +448,14 @@ On BE, Mesa on UMA reads buffer data as-is (no byteswap on unmap), but `MapAndSy
 ### 5. Vulkan Renderer
 Not needed for R600 (OpenGL only scenario), but the Vulkan backend may have endian assumptions.
 
-## Architectural Notes for Future JIT Port
+## Architectural Notes (JITPPC64 Implementation)
 
-When implementing a native PPC64 JIT on PPC64 BE:
-- No instruction byteswap needed (PPC guest = PPC host endianness)
-- Emulated memory can be mapped directly (no endian conversion)
-- Page size difference (4K vs 64K) needs consideration for fastmem
-- ELFv2 ABI differences from ELFv1
+The JITPPC64 backend runs on PPC64 BE (PowerPC 970) with the following characteristics:
+- **No instruction byteswap needed** (PPC guest = PPC host endianness)
+- **Emulated memory mapped directly** (no endian conversion for PPC-side data)
+- **Page size difference** (4K guest vs 64K host) handled via MAP_64KB for fastmem
+- **ELFv2 ABI**: r2 (TOC), r13 (TLS) preserved across JIT code and restored by signal handlers and trampolines; callee-saved GPRs r14-r31 and FPRs f14-f31; stack frames require 16-byte alignment and LR at [SP+16]
+- **AltiVec VRs**: MSR[VR]=1 set at init; VRs are volatile across C++ ABI calls (not preserved)
 
 ## Native Code Execution (NCE) for PPC64
 
@@ -660,53 +661,28 @@ These trap via SIGILL and are emulated. Updated coverage in `HandleSIGILL`, `Emu
 
 ## NCE vs JIT Performance Analysis
 
+**NOTE:** The JITPPC64 backend (described below) compiles **all** ps\_\* instructions via AltiVec — no trap overhead. This NCE section is historical and describes the trap-based approach used by the NCE subsystem (JITPPC64's predecessor). The NCE and JIT backends are independent; the JIT is the primary engine.
 ### Trap-and-Emulate vs AltiVec JIT for Missing Instructions
 
-PPC970 (G5) lacks Gekko-specific instructions (Paired Singles, dcbz with 32-byte zero, mftb, mfspr PVR/TL/TU). Two approaches exist for handling them:
+PPC970 (G5) lacks Gekko-specific instructions (Paired Singles, dcbz with 32-byte zero, mftb, mfspr PVR/TL/TU). The **JITPPC64 backend** (described below) handles all of these:
 
-| Approach | Per-instruction cost | Dev time | Performance vs CachedInterpreter |
-|----------|---------------------|----------|----------------------------------|
-| **Trap** | SIGILL → kernel → C++ handler → sigreturn: ~1-5μs = ~2000-10000 native cycles | Low (extend existing patching) | ~20-50x faster (trap rate <1% of instrs) |
-| **AltiVec trampoline (prototype)** | Inline `b trampoline` → AltiVec → `b return`: ~50 native cycles, no signal | Moderate (existing P0 patching infra) | ~100-200x faster (ps_* only) |
-| **Full AltiVec JIT translator** | Native ALU execution via vaddfp/vmulfp/etc + manual quantize for psq | High (~weeks) | ~70-100x faster (near 1:1 hw speed) |
+- **Paired singles**: **All** ps\_\* arithmetic, compare, select, merge, sum, reciprocal, and quantized load/store compiled inline via AltiVec (VADDFP/VSUBFP/VMULFP/VDIVFP/VREFP/VRSQRTEFP/VSEL/VCMPGEFP/VCMPEQFP/VCMPGTFP/VMRGHW/VMRGLW/VSPLTW/VMADDFP) and native scalar FPU (FCMPU/FCMPO for compares). psq_l/st quantize types 0-4 (float, u8, u16, s8, s16) compiled inline using LFIWAX/STFIWX/FCTIWZ/FRSP + shifts. C helpers only as runtime-GQR-change fallback. **Zero interpreter fallback.**
+- **dcbz**: Compiled as 8 word-stores (emulates 32B on PPC970's 128B dcbz)
+- **mftb/mfspr TL/TU**: Compiled as plain LWZ from cached SPR array (timebase refreshed before each block dispatch)
+- **mfspr PVR**: Emulated via mfspr → interpreter fallback
 
-**Trap approach** works well because real GC/Wii games spend well under 1% of instructions on non-native opcodes. Pure compute (ALU, loads/stores, branches) runs at full PPC970 speed with 0 overhead. The signal round-trip cost only hits when the guest actually executes one of the ~dozen trapped instruction types.
+The **NCE** subsystem (a separate, predecessor engine) uses signal-handler-based trapping and is largely superseded by JITPPC64.
 
-**AltiVec trampoline** (current prototype): ps\_add/sub/mul/mr are patched with `b trampoline_addr` instead of `trap`. The trampoline executes native AltiVec and branches back (no signal). ~50 cycles vs ~5000 for a SIGILL. Covers the most common ps\_\* instructions. psq\_l/st, ps\_div, ps\_abs/neg/nabs, ps\_sel, ps\_cmp, ps\_merge, ps\_sum, ps\_muls, ps\_res/rsqrte still use trap+interpreter.
+### NCE Speed Estimate (historical — JIT compiles all ps\_\* via AltiVec)
 
-**Full AltiVec translator** would eliminate ALL remaining traps by mapping Gekko Paired Singles directly to PPC970 AltiVec:
-- `ps_add`/`ps_mul`/`ps_sub`/`ps_div` → `vaddfp`/`vmulfp`/`vsubfp`/`vdivfp`
-- `ps_sel` → `vsel`
-- `psq_l`/`psq_st` → AltiVec load/store with manual quantize (integer shift + pack/unpack)
-- `ps_mr`/`ps_abs`/`ps_neg`/`ps_nabs` → `vand`/`vandc`/`vor` with sign-bit masks
-- `ps_cmp` → `vcmpeqfp`/`vcmpgtfp` + CR field construction
-- `ps_res`/`ps_rsqrte` → `vrefp`/`vrsqrtefp`
-- `ps_merge00/01/10/11` → `vmrghw`/`vmrglw` permutations
-- `ps_sum0/1` → `vaddfp` with permute
-- `ps_muls0/1` → `vspltw` + `vmulfp`
-
-The translator would need:
-- **GPR mapping**: No translation needed (PPC32 guest on PPC64 host — 32-bit GPRs in low halves of 64-bit GPRs)
-- **VR mapping 1:1**: Gekko has 32 Gekko VRs = 16 pairs of singles; map directly to PPC970's 32 AltiVec VRs (each VR holds 2 singles = 1 pair)
-- **CR field emulation**: Paired-single FP compares update CR1 with FPCC; needs manual CR field merging
-- **FPSCR emulation**: Gekko FPSCR differs from PPC970; VX/FPCC exceptions need software handling
-- **psq_l/st quantize**: Read/write GQRs from emulated memory; shift/round/truncate; optimized with AltiVec bit ops
-
-**Recommendation**: Start with the trap approach (working now), extend patching to all P0 instructions. Add AltiVec translator later for games that hit traps frequently. The trap approach already gives ~80% of potential performance.
-
-### NCE Speed Estimate
-
-| Component | CachedInterpreter | NCE (trap) | NCE + AltiVec |
-|-----------|------------------|------------|---------------|
+| Component | CachedInterpreter | JITPPC64 | NCE (trap) |
+|-----------|------------------|----------|------------|
 | ALU/Load/Store/Branch | ~30 cycles/instr | ~1 cycle | ~1 cycle |
-| Paired Single (ps\_add/sub/mul/mr) | ~50 cycles | ~5000 cycles (SIGILL) | ~50 cycles (AltiVec trampoline) |
-| Paired Single (other ps\_\*) | ~50 cycles | ~5000 cycles (SIGILL) | ~5000 cycles (SIGILL, unavoidable) |
-| dcbz | ~30 cycles | ~5000 cycles (SIGILL) | ~2 cycles (4-instr: dcbz + 3 subi/stw) |
-| mftb/TL/TU | ~20 cycles | ~5000 cycles (SIGILL) | ~1 cycle (native mftb + adjust) |
-| MMIO | ~40 cycles | ~5000 cycles (SIGSEGV) | ~5000 cycles (SIGSEGV, unavoidable) |
-| Supervisor SPR | ~40 cycles | ~5000 cycles (SIGILL) | ~5000 cycles (SIGILL, unavoidable) |
-
-For a typical game with <100 PS instructions per frame: trap approach loses ~0.5ms to PS signal overhead per frame — negligible against 16.6ms frame budget. For PS-heavy scenes (SMG starbit effects, MKDD particle rendering), the loss could reach 2-3ms — still playable.
+| Paired Singles | ~50 cycles | ~50 cycles (AltiVec) | ~5000 cycles (SIGILL) |
+| dcbz | ~30 cycles | ~8 cycles (8 word-stores) | ~2 cycles (4-instr) |
+| mftb/TL/TU | ~20 cycles | ~1 cycle (LWZ from SPR cache) | ~5000 cycles (SIGILL) |
+| MMIO | ~40 cycles | ~5-50 cycles (inline or SIGSEGV) | ~5000 cycles (SIGSEGV) |
+| Supervisor SPR | ~40 cycles | ~1 cycle (MTSPR/MFSPR) or block fallback | ~5000 cycles (SIGILL) |
 
 ## Session 2026-07-16: JITPPC64 File Split + Build Fixes
 
@@ -726,7 +702,7 @@ For a typical game with <100 PS instructions per frame: trap approach loses ~0.5
 | `JitPPC64_RegCache.h` | `JitPPC64RegCache` struct (18 host GPRs, dirty tracking) |
 | `JitPPC64_RegCache.cpp` | `R()`/`W()`/`Flush()`/`Reset()`/`FindFreeHostReg()` |
 | `JitPPC64_BackPatch.cpp` | `InitBackpatch()`/`ShutdownBackpatch()`/`AddBackpatchEntry()`/`HandleFault()` |
-| `JitPPC64_Paired.cpp` | `CompilePairedSingle` — AltiVec-accelerated ps\_add/sub/mul/div |
+| `JitPPC64_Paired.cpp` | `CompilePairedSingle` — all ps\_\* via AltiVec (VADDFP/VSUBFP/VMULFP/VDIVFP/VREFP/VRSQRTEFP/VSEL/VMADDFP/VMRGHW/VSPLTW) + scalar FPU for compare/quantize |
 | `PPC64Assembler.h` | Full PPC64 assembler with AltiVec (already existed, now confirmed complete) |
 
 ### Build Errors Fixed
@@ -740,13 +716,14 @@ For a typical game with <100 PS instructions per frame: trap approach loses ~0.5
 | 5 | `EraseBlock` no such method | Jit.cpp | `m_block_cache.EraseBlock(...)` → `m_block_cache.EraseSingleBlock(block)` |
 | 6 | `m_dispatcher_entry` private | Jit.h | Added `friend class JitPPC64BlockCache;` |
 
-### `JitPPC64_Paired.cpp` — AltiVec Accelerator
+### `JitPPC64_Paired.cpp` — AltiVec-Accelerated Paired Singles
 
-- Handles opcd 4 (Paired Singles) with `SUBOP5` dispatch
+- **SUBOP10 dispatch**: ps_mr (72), ps_neg (40), ps_nabs (136), ps_abs (264) — native X-form; ps_merge00/01/10/11 (528/560/592/624) — VMRGHW/VSPLTW + pack; ps_cmpu0/cmpu1/cmpo0/cmpo1 (0/32/64/96) — native FCMPU/FCMPO
+- **SUBOP5 dispatch** (all AltiVec): ps_add (21→VADDFP), ps_sub (20→VSUBFP), ps_mul (25→VMULFP), ps_div (18→VDIVFP), ps_sum0/1 (10/11→VADDFP+VSPLTW), ps_muls0/1 (12/13→VSPLTW+VMULFP), ps_madds0/1 (14/15→VMADDFP), ps_sel (23→VCMPGEFP+VSEL), ps_res (24→VREFP), ps_rsqrte (26→VRSQRTEFP)
+- **psq_l/st**: All quantize types (0=float, 1=u8, 2=u16, 3=s8, 4=s16) compiled inline using scalar FPU (LFIWAX/STFIWX/FCTIWZ/FRSP) and shifts. C helpers only as runtime-GQR-change fallback
 - `LoadFPRPairToVR`: extracts Gekko u64 pair (ps0:upper32, ps1:lower32) → 16-byte memory → `LVX` into AltiVec VR
 - `StoreVRToFPRPair`: `STVX` → LWZ halves → pack u64 → STD to `ppcState.ps[fr]`
-- Emits `VADDFP`/`VSUBFP`/`VMULFP`/`VDIVFP` for ps\_add/sub/mul/div
-- Other ps\_\* instructions via `SUBOP5` still fall back to interpreter
+- Zero interpreter fallback for any ps\_* instruction
 
 ### Register Conventions (unchanged from before)
 
@@ -816,7 +793,7 @@ For a typical game with <100 PS instructions per frame: trap approach loses ~0.5
 | FPU (double, opcd 63) | **All** fadd/fsub/fdiv/fmul/frsp/fsel/frsqrte/fmadd/fmsub/fnmadd/fnmsub/fmr/fneg/fabs/fnabs/fctiw/fctiwz/fcmpu/fcmpo/mffs/mtfsf/mtfsfi/mtfsb0/mtfsb1 | |
 | Cache/Barrier | **All native** dcbst/dcbf/dcbt/dcbtst/dcbi/dcbz/excluded/sync/eieio/icbi | dcbz excluded (128B ≠ 32B) |
 | System Register | **All** mfcr/mtcrf/mfspr/mtspr/mfmsr/mtmsr/mftb | sc/rfi excluded |
-| Paired Singles | ps\_add/sub/mul/mr/abs/neg/nabs via AltiVec trampoline; remainder via trap→interpreter | psq\_l/psq\_st excluded |
+| Paired Singles | **All** ps_add/sub/mul/div/sel/res/rsqrte/mr/abs/neg/nabs/cmpu*/cmpo*/merge*/sum*/muls*/madds*, psq_l/st (all quantize types) | Compiled via AltiVec (VADDFP/VSUBFP/VMULFP/VDIVFP etc.) or native scalar FPU (FCMPU/FCMPO for compares). C helpers only as runtime-GQR-change fallback for psq_l/st. |
 
 ### CA-Using Ops Implementation
 
@@ -834,12 +811,10 @@ For a typical game with <100 PS instructions per frame: trap approach loses ~0.5
 **Key:** All use 64-bit arithmetic on zero-extended operands. The 32-bit carry is extracted via `RLDICL(rd, rs, 32, 63)` which rotates bit 32 (the carry) to the LSB. Results and carry stored independently. Rc bit updates CR0 via `EmitCR0Update()`. `mcrxr` (XO=512) remains block-level fallback (complex CR field construction from XER).
 
 ### JIT Coverage Summary
-All Gekko integer ALU, FPU, load/store, branch, CR logical, paired single (all ps\_*) instructions are now compiled. Remaining fallbacks:
+All Gekko integer ALU, FPU, load/store, branch, CR logical, paired single (all ps\_*) instructions are now compiled. All ps\_\* arithmetic, compare, select, merge, sum, reciprocal, and quantized load/store are compiled — no interpreter fallback at all. Remaining fallbacks:
 
 | Instruction | Reason |
 |-------------|--------|
-| **ps\_cmpu0/ps\_cmpo0/ps\_cmpu1/ps\_cmpo1** | Set CR1 — complex CR construction; trap→interpreter |
-| **psq\_l/st integer types** | Quantize types != 0 (U8/U16/S8/S16) — block-level interpreter fallback |
 | **dcbz** | Emulated with 8 word-stores (32B → 128B mismatch) |
 | **lmw/stmw** | Implemented with loops |
 | **sc/rfi** | System call / return from interrupt — interpreter needed |

@@ -52,7 +52,7 @@ static void StoreVRToFPRPair(PPC64Assembler& asm_, u32 fr, u32 vs)
   asm_.STVX(vs, 0, 3);
   asm_.LWZ(REG_SCRATCH2, 3, 0);
   asm_.LWZ(REG_SCRATCH, 3, 4);
-  asm_.RLDICR(REG_SCRATCH2, REG_SCRATCH2, 32, 31);  // keep upper 32 bits (me=31)
+  asm_.RLDICL(REG_SCRATCH2, REG_SCRATCH2, 32, 0);   // rotate left 32, MB=0 → MASK(0,63)=all 1s
   asm_.OR(REG_SCRATCH2, REG_SCRATCH2, REG_SCRATCH);
   asm_.STD(REG_SCRATCH2, REG_PPC_BASE, PS_OFFSET + 16 * fr);
 }
@@ -422,7 +422,7 @@ bool JitPPC64::CompilePairedLoadStore(UGeckoInstruction inst)
         m_asm.LFS(0, REG_SCRATCH2, 0);
         m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET + 16 * fr));
         m_asm.ADDI(REG_SCRATCH, 0, 0x3FF0);
-        m_asm.RLDICR(REG_SCRATCH, REG_SCRATCH, 48, 15);
+        m_asm.RLDICL(REG_SCRATCH, REG_SCRATCH, 48, 0);   // rotate left 48, MB=0 → MASK(0,63)=all 1s
         m_asm.STD(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PS_OFFSET + 16 * fr + 8));
       }
       else
@@ -475,7 +475,7 @@ bool JitPPC64::CompilePairedLoadStore(UGeckoInstruction inst)
         // Store ps0 as double, ps1 = double(1.0)
         m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET + 16 * fr));
         m_asm.LI(REG_SCRATCH, 0x3FF0);
-        m_asm.RLDICR(REG_SCRATCH, REG_SCRATCH, 48, 15);
+        m_asm.RLDICL(REG_SCRATCH, REG_SCRATCH, 48, 0);
         m_asm.STD(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PS_OFFSET + 16 * fr + 8));
       }
       else

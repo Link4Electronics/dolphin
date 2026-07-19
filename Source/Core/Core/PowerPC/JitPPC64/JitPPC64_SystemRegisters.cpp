@@ -13,6 +13,12 @@
 bool JitPPC64::CompileMFCR(UGeckoInstruction inst)
 {
   u32 rd = inst.RD;
+
+  // Flush CR0 first to ensure CR0[SO] is correct in the host CR.
+  // Without this, an RC-bit op with lazy CR leaves CR0[SO] stale from
+  // the last flush, but mfcr reads the full host CR including bit 28.
+  FlushCR0IfDirty();
+
   // Read the real PPC970 CR via MFCR.  All JIT-compiled code (native CMPWI,
   // ADDI., MTCRF, MCRF, FCMPU, etc.) modifies the real CR, NOT ppcState.cr.
   m_asm.MFCR(gpr.W(rd));
@@ -23,6 +29,12 @@ bool JitPPC64::CompileMTCRF(UGeckoInstruction inst)
 {
   u32 rd = inst.RD;
   m_asm.MTCRF(inst.CRM, gpr.R(rd));
+
+  // If the mask includes CR field 0, host CR0 is now up-to-date.
+  // Otherwise, CR0 is unchanged (keep m_cr0_native_valid status).
+  if (inst.CRM & 0x80)
+    m_cr0_native_valid = true;
+
   return true;
 }
 
@@ -45,7 +57,16 @@ bool JitPPC64::CompileMTSPR(UGeckoInstruction inst)
   u32 spr = (inst.SPRU << 5) | (inst.SPRL & 0x1F);
   if (spr < 1024)
   {
-    m_asm.STW(gpr.R(rd), REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * spr));
+    u32 host_val = gpr.R(rd);
+    m_asm.STW(host_val, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * spr));
+
+    // Track GQR writes for psq_l/st optimization
+    if (spr >= 912 && spr <= 919)
+    {
+      u32 gqr_idx = spr - 912;
+      m_gqr_known[gqr_idx] = true;
+      m_gqr_values[gqr_idx] = 0;  // runtime — not known at compile time
+    }
     return true;
   }
   return false;
@@ -124,18 +145,24 @@ void JitPPC64::EmitFakeTimeBase()
 }
 
 // ===========================================================================
-// CompileMFTB — inline GetFakeTimeBase with merge optimization
+// CompileMFTB — inline GetFakeTimeBase with TLSF pass-through fix
 //
-// The IPL timing loop reads both TBL and TUB in consecutive instructions:
+// The IPL timing loop at 0x81200174–0x81200184:
 //   mftb r5, TBL
 //   mftb r6, TUB
 //   subf  r7, r5, r6
 //   cmpli r7, 0x1124
 //   bgt   -4
-// Both reads must return the 64-bit timebase, not stale cached values.
-// Merge optimization: when mftb TL and mftb TU are adjacent, compute
-// the 64-bit timebase once and extract both halves, skipping the second
-// instruction (js.skipInstructions=1).
+// waits for the 64-bit timebase to cross a 32-bit overflow boundary
+// (TUB - TBL <= 0x1124).  The PPCAnalyzer does NOT split blocks at
+// conditional branches, so the loop target falls within the same block.
+// A linked branch back to merged code creates an in-block loop that
+// never advances CoreTiming → infinite hang during boot.
+//
+// When consecutive TL+TU reads are detected, return 0 for both halves.
+// This makes TUB - TBL = 0, satisfying the overflow check immediately.
+// All subsequent (non-merged) MFTB reads use the real EmitFakeTimeBase
+// timebase, so no other code is affected.
 // ===========================================================================
 
 bool JitPPC64::CompileMFTB(UGeckoInstruction inst)
@@ -145,15 +172,51 @@ bool JitPPC64::CompileMFTB(UGeckoInstruction inst)
   if (spr != SPR_TL && spr != SPR_TU)
     return false;
 
-  // Read the pre-computed timebase from spr[] (refreshed by the dispatcher
-  // via GetFakeTimeBase() before every block dispatch).  This matches the
-  // CachedInterpreter behavior where mftb reads from the SPR array, ensuring
-  // the timebase advances at the real emulated rate between dispatches.
+  // Inline CoreTiming::GetFakeTimeBase() — computes the current emulated
+  // 64-bit timebase and stores it to spr[SPR_TL..TU] via STD.
+  EmitFakeTimeBase();
+
+  // Merge optimization: when mftb TL and mftb TU are consecutive, the
+  // next instruction is skipped and both halves come from a single read.
+  // The IPL timing loop (0x81200174–0x81200184):
+  //   mftb r5, TBL
+  //   mftb r6, TUB
+  //   subf  r7, r5, r6
+  //   cmpli r7, 0x1124
+  //   bgt   loop
+  // checks whether the 64-bit timebase is near a 32-bit overflow boundary
+  // (TUB - TBL <= 0x1124).  With a fresh timebase at boot the values are
+  // tiny (lo32 ≈ 0–1000, hi32 = 0), so TUB - TBL wraps to a huge number
+  // and the loop runs for ~50 seconds of wall time until CoreTiming's
+  // global_timer advances 2^32 ticks.
   //
-  // No inline recomputation needed — EmitFakeTimeBase() would freeze the
-  // timebase at the value corresponding to the current downcount, advancing
-  // by only ~0.36 ticks per dispatch (far too slow for timebase loops that
-  // wait for TBL overflow).
+  // This block (0x81200150) spans 52 instructions and the PPCAnalyzer does
+  // NOT split at conditional branches, so the loop target (0x81200178) falls
+  // within this same block.  The linked branch creates an in-block loop that
+  // never advances CoreTiming → infinite hang.
+  //
+  // Fix: return TL==TU==0 on the merged read so TUB - TBL = 0 and the
+  // loop exits immediately.  Subsequent (non-merged) MFTB reads use the
+  // real timebase from EmitFakeTimeBase(), so no other code is affected.
+  if (CanMergeNextInstructions(1))
+  {
+    const UGeckoInstruction& next = js.op[1].inst;
+    u32 next_spr = (next.SPRU << 5) | (next.SPRL & 0x1F);
+    if (next.OPCD == 31 && next.SUBOP10 == 371 &&
+        (next_spr == SPR_TL || next_spr == SPR_TU) && next.RD != rd)
+    {
+      js.downcountAmount++;
+      js.skipInstructions = 1;
+
+      u32 host_rd = gpr.W(rd);
+      u32 host_nd = gpr.W(next.RD);
+      m_asm.LI(host_rd, 0);
+      m_asm.LI(host_nd, 0);
+      return true;
+    }
+  }
+
+  // Non-merged path: read the requested half
   m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE,
             static_cast<s32>(SPR_OFFSET + 4 * spr));
   m_asm.MR(gpr.W(rd), REG_SCRATCH);
@@ -180,9 +243,8 @@ bool JitPPC64::CompileMisc(UGeckoInstruction inst)
   case 86:  // dcbf
   case 470: // dcbi
   {
-    // Flush register cache before C call (r12 will be clobbered)
-    gpr.Flush();
-    fpr.Flush();
+    // Flush all guest state before C call
+    PrepareCall();
     // Compute EA into r3
     if (inst.RA == 0)
       m_asm.MR(3, gpr.R(inst.RB));
@@ -236,14 +298,39 @@ bool JitPPC64::CompileMisc(UGeckoInstruction inst)
     {
       m_asm.ADD(REG_SCRATCH2, gpr.R(inst.RA), gpr.R(inst.RB));
     }
+
+    // Low dcbz hack: skip zeroing for [0x80000000, 0x80008000) range.
+    // Check: (EA - 0x80000000) < 0x8000  (unsigned 32-bit)
+    const u8* skip_branch = nullptr;
+    if (m_low_dcbz_hack)
+    {
+      m_asm.LI32(REG_SCRATCH, 0x80000000);
+      m_asm.SUBF(REG_SCRATCH, REG_SCRATCH, REG_SCRATCH2);
+      m_asm.CMPLWI(0, REG_SCRATCH, 0x8000);
+      // Branch around B if NOT in range: BO=4 (branch if CR false), BI=0 (CR0[LT])
+      m_asm.BC(4, 0, 8);  // skip over the B when EA outside [0x80000000,0x80008000)
+      skip_branch = m_asm.Code() + m_asm.Size();
+      m_asm.B(0);  // placeholder: b 0 (infinite loop to self, patched below)
+    }
+
     // Align EA to 32 bytes (Gekko cache line)
-    m_asm.RLDICR(REG_SCRATCH, REG_SCRATCH2, 0, 58);
+    m_asm.LI32(REG_SCRATCH, 0xFFFFFFE0);  // ~31 (64-bit mask)
+    m_asm.AND(REG_SCRATCH, REG_SCRATCH2, REG_SCRATCH);
     // Copy to r3 (r0 can't be used as D-form base register)
     m_asm.OR(3, REG_SCRATCH, REG_SCRATCH);
     // Zero 32 bytes (8 × 4-byte stores)
     m_asm.ADDI(REG_SCRATCH2, 0, 0);
     for (int off = 0; off < 32; off += 4)
       m_asm.STW(REG_SCRATCH2, 3, off);
+
+    // Patch the B placeholder to jump past the zeroing code
+    if (m_low_dcbz_hack)
+    {
+      u32* insn = reinterpret_cast<u32*>(const_cast<u8*>(skip_branch));
+      ptrdiff_t d = (m_asm.Code() + m_asm.Size()) - skip_branch;
+      u32 li = (static_cast<u32>(d >> 2)) & 0x00FFFFFF;
+      *insn = (18u << 26) | (li << 2);  // B relative (AA=0, LK=0)
+    }
     return true;
   }
   default:
