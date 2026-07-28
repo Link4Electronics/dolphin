@@ -23,6 +23,11 @@
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 
+// Uncomment to enable block-level execution tracing:
+//   - Clear OPTION_CONDITIONAL_CONTINUE (every conditional branch is a block boundary)
+//   - Print PC + GPRs + downcount at each block dispatch
+#define JITPROBE_BLOCK_TRACE
+
 // TrampolineDispatcher — defined in JitPPC64_BackPatch.cpp
 extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
                                      u32 is_store, u32 access_size,
@@ -260,7 +265,9 @@ void JitPPC64::Init()
   InitBLROptimization();
 
   // Enable all analyzer optimizations for better block analysis
+#ifndef JITPROBE_BLOCK_TRACE
   analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE);
+#endif
   analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_BRANCH_MERGE);
   analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_CROR_MERGE);
   analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_CARRY_MERGE);
@@ -1531,6 +1538,7 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
       continue;
     }
 
+    js.instructionsLeft = static_cast<s32>(code_block.m_num_instructions - i - 1);
     CompileInstruction(op);
     m_constant_propagation.Apply(cp_result);
 
@@ -1626,11 +1634,14 @@ void JitPPC64::Run()
       // falls through to the dispatcher.  The dispatcher chains blocks
       // internally (via JitPPC64Dispatch + block linking) until
       // downcount ≤ 0, then returns to Run().
-      fprintf(stderr, "JITPROBE: Run() calling enter_code at pc=0x%08X downcount=%d\n",
-              m_ppc_state.pc, m_ppc_state.downcount);
+      DumpBlockTrace();
       reinterpret_cast<void (*)()>(m_enter_code)();
-      fprintf(stderr, "JITPROBE: Run() returned from enter_code at pc=0x%08X downcount=%d\n",
-              m_ppc_state.pc, m_ppc_state.downcount);
+      {
+        static u32 heartbeat = 0;
+        if (++heartbeat % 100 == 1 || heartbeat < 5)
+          fprintf(stderr, "JIT_TRACE: ret heartbeat=%u pc=0x%08X downcount=%d\n",
+                  heartbeat, m_ppc_state.pc, m_ppc_state.downcount);
+      }
     }
   }
   UnprotectStack();
@@ -1731,6 +1742,22 @@ void JitPPC64::EmitBackpatchSlot()
 // ===========================================================================
 // Debug helpers
 // ===========================================================================
+
+void JitPPC64::DumpBlockTrace()
+{
+#ifdef JITPROBE_BLOCK_TRACE
+  fprintf(stderr, "JIT_TRACE: pc=0x%08X downcount=%d "
+                  "gpr[1]=0x%08X gpr[2]=0x%08X gpr[3]=0x%08X gpr[4]=0x%08X "
+                  "gpr[5]=0x%08X gpr[6]=0x%08X gpr[7]=0x%08X gpr[8]=0x%08X "
+                  "spr[TL]=0x%08X spr[TU]=0x%08X\n",
+          m_ppc_state.pc, m_ppc_state.downcount,
+          m_ppc_state.gpr[1], m_ppc_state.gpr[2],
+          m_ppc_state.gpr[3], m_ppc_state.gpr[4],
+          m_ppc_state.gpr[5], m_ppc_state.gpr[6],
+          m_ppc_state.gpr[7], m_ppc_state.gpr[8],
+          m_ppc_state.spr[SPR_TL], m_ppc_state.spr[SPR_TU]);
+#endif
+}
 
 void JitPPC64::DumpCode(const u8* start, size_t size)
 {

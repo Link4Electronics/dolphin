@@ -198,6 +198,7 @@ bool JitPPC64::CompileMFTB(UGeckoInstruction inst)
   // Fix: return TL==TU==0 on the merged read so TUB - TBL = 0 and the
   // loop exits immediately.  Subsequent (non-merged) MFTB reads use the
   // real timebase from EmitFakeTimeBase(), so no other code is affected.
+  bool merge_taken = false;
   if (CanMergeNextInstructions(1))
   {
     const UGeckoInstruction& next = js.op[1].inst;
@@ -205,6 +206,7 @@ bool JitPPC64::CompileMFTB(UGeckoInstruction inst)
     if (next.OPCD == 31 && next.SUBOP10 == 371 &&
         (next_spr == SPR_TL || next_spr == SPR_TU) && next.RD != rd)
     {
+      merge_taken = true;
       js.downcountAmount++;
       js.skipInstructions = 1;
 
@@ -212,9 +214,21 @@ bool JitPPC64::CompileMFTB(UGeckoInstruction inst)
       u32 host_nd = gpr.W(next.RD);
       m_asm.LI(host_rd, 0);
       m_asm.LI(host_nd, 0);
-      return true;
     }
   }
+
+  {
+    int n_opcd = CanMergeNextInstructions(1) ? static_cast<int>(js.op[1].inst.OPCD) : -1;
+    int n_subop10 = CanMergeNextInstructions(1) ? static_cast<int>(js.op[1].inst.SUBOP10) : -1;
+    u32 n_spr = CanMergeNextInstructions(1) ? ((static_cast<u32>(js.op[1].inst.SPRU) << 5) | (static_cast<u32>(js.op[1].inst.SPRL) & 0x1F)) : 0u;
+    int n_rd = CanMergeNextInstructions(1) ? static_cast<int>(js.op[1].inst.RD) : -1;
+    fprintf(stderr, "JITPROBE_MFTB: pc=0x%08X spr=%u%s merge=%d next_opcd=%d next_subop10=%d next_spr=%u next_rd=%d\n",
+            js.compilerPC, spr, spr == SPR_TL ? " (TL)" : spr == SPR_TU ? " (TU)" : "",
+            merge_taken, n_opcd, n_subop10, n_spr, n_rd);
+  }
+
+  if (merge_taken)
+    return true;
 
   // Non-merged path: read the requested half
   m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE,
