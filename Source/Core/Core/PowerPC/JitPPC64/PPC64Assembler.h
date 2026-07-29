@@ -303,44 +303,39 @@ public:
   void STDUX(u32 rs, u32 ra, u32 rb) { Write32(X(31, rs, ra, rb, 181, false)); }
 
   // rldic RA, RS, SH, MB — rotate left double immediate and clear (inserts at MB)
-  // MD-form: opcd=30, xo=010 at u32 bits 3:1 (PPC bits 28-30)
-  //   Same field layout as rldicl/rldicr; mb field defines mask left boundary.
-  //   Rotate left by SH, then insert into mask MB..MB+SH-1 from rotated value.
-  //   Used for half-swap: rldic rd, rd, 32, 0  (swap upper/lower 32 bits)
+  // MD-form: opcd=30, xo=010
+  //   u15-u11: sh[4:0], u10-u6: mb[4:0], u5: mb[5],
+  //   u4-u2: xo (010=rldic), u1: sh[5], u0: Rc
   void RLDIC(u32 ra, u32 rs, u32 sh, u32 mb, bool rc = false)
   {
     Write32((30u << 26) | ((rs & 0x1F) << 21) | ((ra & 0x1F) << 16) |
-            ((sh & 0x1F) << 11) | (((sh >> 5) & 1) << 10) |
-            ((mb & 0x1F) << 5) | (((mb >> 5) & 1) << 4) |
-            (2u << 1) | (rc ? 1u : 0u));
+            ((sh & 0x1F) << 11) | (((sh >> 5) & 1) << 1) |
+            ((mb & 0x1F) << 6) | (((mb >> 5) & 1) << 5) |
+            (2u << 2) | (rc ? 1u : 0u));
   }
 
   // rldicr RA, RS, SH, ME — rotate left double immediate and clear right
-  // MD-form: opcd=30, xo=001 at u32 bits 3:1 (PPC bits 28-30)
-  //   u31-u26: opcd=30, u25-21: RS, u20-16: RA,
-  //   u15-u11: sh[4:0], u10: sh[5],
-  //   u9-u5: me[4:0], u4: me[5],
-  //   u3-u1: xo (3-bit, 001=rldicr), u0: Rc
+  // MD-form: opcd=30, xo=001
+  //   u15-u11: sh[4:0], u10-u6: me[4:0], u5: me[5],
+  //   u4-u2: xo (001=rldicr), u1: sh[5], u0: Rc
   void RLDICR(u32 ra, u32 rs, u32 sh, u32 me, bool rc = false)
   {
     Write32((30u << 26) | ((rs & 0x1F) << 21) | ((ra & 0x1F) << 16) |
-            ((sh & 0x1F) << 11) | (((sh >> 5) & 1) << 10) |
-            ((me & 0x1F) << 5) | (((me >> 5) & 1) << 4) |
-            (1u << 1) | (rc ? 1u : 0u));
+            ((sh & 0x1F) << 11) | (((sh >> 5) & 1) << 1) |
+            ((me & 0x1F) << 6) | (((me >> 5) & 1) << 5) |
+            (1u << 2) | (rc ? 1u : 0u));
   }
 
   // rldicl RA, RS, SH, MB — rotate left double immediate and clear left
-  // MD-form: opcd=30, xo=000 at u32 bits 3:1 (PPC bits 28-30)
-  //   u31-u26: opcd=30, u25-21: RS, u20-16: RA,
-  //   u15-u11: sh[4:0], u10: sh[5],
-  //   u9-u5: mb[4:0], u4: mb[5],
-  //   u3-u1: xo (3-bit field, 000=rldicl), u0: Rc
+  // MD-form: opcd=30, xo=000
+  //   u15-u11: sh[4:0], u10-u6: mb[4:0], u5: mb[5],
+  //   u4-u2: xo (000=rldicl), u1: sh[5], u0: Rc
   void RLDICL(u32 ra, u32 rs, u32 sh, u32 mb, bool rc = false)
   {
     Write32((30u << 26) | ((rs & 0x1F) << 21) | ((ra & 0x1F) << 16) |
-            ((sh & 0x1F) << 11) | (((sh >> 5) & 1) << 10) |
-            ((mb & 0x1F) << 5) | (((mb >> 5) & 1) << 4) |
-            (0u << 1) | (rc ? 1u : 0u));
+            ((sh & 0x1F) << 11) | (((sh >> 5) & 1) << 1) |
+            ((mb & 0x1F) << 6) | (((mb >> 5) & 1) << 5) |
+            (0u << 2) | (rc ? 1u : 0u));
   }
 
   // Zero-extend 32-bit: rldicl rd, rs, 0, 32  (clear upper 32 bits)

@@ -528,27 +528,7 @@ void JitPPC64::EmitProlog()
     m_asm.STFD(i, 1, static_cast<s32>(CALLEE_SAVE_FPR_BASE + (i - 14) * 8));
 
   // Load REG_PPC_BASE with &ppcState (the emulated CPU state structure).
-  // NOTE: must NOT use ORIS(rd,0,...) — logical ops (ORIS/ORI) do NOT treat
-  // RA=0 as the value zero.  Only ADDI/ADDIS have that special case.
-  // Always zero rd via LI (ADDI rd,0,0) before building up with ORIS/ORI.
-  u64 addr = reinterpret_cast<u64>(&m_ppc_state);
-  if (addr > 0xFFFFFFFFULL)
-  {
-    u32 hi = static_cast<u32>(addr >> 32);
-    u32 lo = static_cast<u32>(addr & 0xFFFFFFFF);
-    m_asm.LI(REG_PPC_BASE, 0);
-    m_asm.ORIS(REG_PPC_BASE, REG_PPC_BASE, static_cast<u32>(hi >> 16));
-    m_asm.ORI(REG_PPC_BASE, REG_PPC_BASE, hi & 0xFFFF);
-    m_asm.RLDICL(REG_PPC_BASE, REG_PPC_BASE, 32, 0);
-    m_asm.ORIS(REG_PPC_BASE, REG_PPC_BASE, static_cast<u32>(lo >> 16));
-    m_asm.ORI(REG_PPC_BASE, REG_PPC_BASE, lo & 0xFFFF);
-  }
-  else
-  {
-    m_asm.LI(REG_PPC_BASE, 0);
-    m_asm.ORIS(REG_PPC_BASE, REG_PPC_BASE, static_cast<u32>(addr >> 16));
-    m_asm.ORI(REG_PPC_BASE, REG_PPC_BASE, static_cast<u32>(addr & 0xFFFF));
-  }
+  TrampMOVI64(m_asm, REG_PPC_BASE, reinterpret_cast<u64>(&m_ppc_state));
 
   // Save REG_PPC_BASE (r12) at [SP+24] (TOC save slot).
   // This is done AFTER r12 is loaded with &ppcState so that the saved

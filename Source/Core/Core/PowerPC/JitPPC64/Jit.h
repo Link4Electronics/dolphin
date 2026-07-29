@@ -11,10 +11,11 @@
 #include "Core/PowerPC/JitPPC64/PPC64Assembler.h"
 
 // Emit a 64-bit immediate load into a PPC64 assembler.
-// Used by EmitBackpatchRoutine and CompileMFTB to load function addresses.
-//
-// Builds from MSB to LSB using only ORI (zero-extending) + RLDICL(rd,rd,16,0).
-// ORIS/ADDIS sign-extend and corrupt upper bits when SI≥0x8000, so they are avoided.
+// Builds upper 32 bits, rotates by 32 (swap halves), builds lower 32 bits.
+// This is safe because RLDICL by 32 is exactly half the register: the rotate
+// acts as a clean upper/lower swap with no wrap-around corruption.
+// NOTE: must NOT use ORI(rd, 0, hw) — logical ops do NOT treat RA=0 as zero.
+// Always zero via LI (ADDI ra=0 → zero) then ORI with rd as source.
 inline void TrampMOVI64(PPC64Assembler& asm_, u32 rd, u64 imm)
 {
   if (imm == 0)
@@ -23,30 +24,20 @@ inline void TrampMOVI64(PPC64Assembler& asm_, u32 rd, u64 imm)
     return;
   }
 
-  // Find first non-zero 16-bit halfword from MSB side.
-  int start = 0;
-  if ((imm >> 48) != 0)
-    start = 3;
-  else if ((imm >> 32) != 0)
-    start = 2;
-  else
-    start = 1;
+  u32 hi = static_cast<u32>(imm >> 32);
+  u32 lo = static_cast<u32>(imm & 0xFFFFFFFF);
 
-  // Load first non-zero halfword.
-  // NOTE: must NOT use ORI(rd, 0, hw) because ORI/ORIS do NOT treat
-  // RA=0 as the value zero — they use GPR[0] literally.  Instead, zero
-  // rd via LI (ADDI ra=0 → zero) then ORI with rd as source.
-  u32 hw = static_cast<u32>((imm >> (start * 16)) & 0xFFFF);
-  asm_.LI(rd, 0);       // rd = 0  (ADDI treats RA=0 as zero)
-  asm_.ORI(rd, rd, hw); // rd = hw (zero-extended)
-
-  // Shift and OR each remaining halfword from MSB to LSB.
-  for (int i = start - 1; i >= 0; --i)
+  asm_.LI(rd, 0);
+  if (hi)
   {
-    const u32 hw_i = static_cast<u32>((imm >> (i * 16)) & 0xFFFF);
-    asm_.RLDICL(rd, rd, 16, 0);
-    if (hw_i != 0)
-      asm_.ORI(rd, rd, hw_i);
+    asm_.ORIS(rd, rd, hi >> 16);
+    asm_.ORI(rd, rd, hi & 0xFFFF);
+  }
+  asm_.RLDICL(rd, rd, 32, 0);
+  if (lo)
+  {
+    asm_.ORIS(rd, rd, lo >> 16);
+    asm_.ORI(rd, rd, lo & 0xFFFF);
   }
 }
 
