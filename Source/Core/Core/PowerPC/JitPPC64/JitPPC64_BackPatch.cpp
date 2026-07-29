@@ -278,6 +278,8 @@ extern "C" const u8* JitPPC64Dispatch(u32 pc)
   if (!jit)
     return nullptr;
 
+  fprintf(stderr, "JITPROBE: dispatch pc=0x%08X\n", pc);
+
   // Update the emulated timebase from CoreTiming before each block dispatch.
   // This ensures CompileMFTB's cached SPR reads return fresh values, and that
   // the timebase advances between loop iterations (even within the same slice,
@@ -295,11 +297,23 @@ extern "C" const u8* JitPPC64Dispatch(u32 pc)
     // Skip if this PC already failed — avoids log spam from tight retry loops.
     if (jit->m_failed_pcs.count(pc) == 0)
     {
+      fprintf(stderr, "JITPROBE: compiling block at 0x%08X\n", pc);
       jit->Jit(pc);
       block =
           jit->GetBlockCache()->GetBlockFromStartAddress(pc, jit->m_ppc_state.feature_flags);
       if (!block)
+      {
+        fprintf(stderr, "JITPROBE: BLOCK COMPILE FAILED at 0x%08X\n", pc);
         jit->m_failed_pcs.insert(pc);
+      }
+      else
+      {
+        fprintf(stderr, "JITPROBE: block compiled OK at 0x%08X (entry=%p)\n", pc, block->normalEntry);
+      }
+    }
+    else
+    {
+      fprintf(stderr, "JITPROBE: block at 0x%08X already in failed_pcs, skipping\n", pc);
     }
   }
   if (block)
@@ -307,6 +321,7 @@ extern "C" const u8* JitPPC64Dispatch(u32 pc)
     jit->m_ppc_state.downcount -= static_cast<s32>(block->originalSize);
     return block->normalEntry;
   }
+  fprintf(stderr, "JITPROBE: dispatch returning NULL for pc=0x%08X\n", pc);
   return nullptr;
 }
 

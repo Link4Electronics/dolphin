@@ -123,9 +123,9 @@ public:
     // Move result (r3) to destination host GPR
     m_asm->MR(m_host_reg, 3);
 
-    // Restore CR, r12, r13, r10 from sub-frame (reverse order)
-    m_asm->LD(JitPPC64::REG_SCRATCH, 1, 32);  // CR saved at old SP-16 = frame SP+32
+    // Restore r12 first (r0 must be free for checkpoint), then CR, r13, r10
     m_asm->LD(JitPPC64::REG_PPC_BASE, 1, 40); // r12 saved at old SP-8 = frame SP+40
+    m_asm->LD(JitPPC64::REG_SCRATCH, 1, 32);  // CR saved at old SP-16 = frame SP+32
     m_asm->LD(JitPPC64::REG_PHYS_BASE, 1, 24); // r13 saved at old SP-24 = frame SP+24
     m_asm->LD(10, 1, 16);                      // r10 saved at old SP-32 = frame SP+16
     m_asm->ADDI(1, 1, 48);                     // tear down sub-frame
@@ -230,9 +230,9 @@ public:
     m_asm->MTCTR(12);
     m_asm->BCTRL();
 
-    // Restore CR, r12, r13, r10 from sub-frame (reverse order)
-    m_asm->LD(JitPPC64::REG_SCRATCH, 1, 32);  // CR saved at old SP-16 = frame SP+32
+    // Restore r12 first (r0 must be free for checkpoint), then CR, r13, r10
     m_asm->LD(JitPPC64::REG_PPC_BASE, 1, 40); // r12 saved at old SP-8 = frame SP+40
+    m_asm->LD(JitPPC64::REG_SCRATCH, 1, 32);  // CR saved at old SP-16 = frame SP+32
     m_asm->LD(JitPPC64::REG_PHYS_BASE, 1, 24); // r13 saved at old SP-24 = frame SP+24
     m_asm->LD(10, 1, 16);                      // r10 saved at old SP-32 = frame SP+16
     m_asm->ADDI(1, 1, 48);                     // tear down sub-frame

@@ -48,6 +48,7 @@ u32 FPSCR_OFFSET = 0;
 
 // Signal handler for MMIO backpatching
 JitPPC64* g_jit_ppc64_instance = nullptr;
+
 static struct sigaction s_old_sigsegv;
 
 // code_region address for signal handler debug output
@@ -181,11 +182,10 @@ static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
   auto* uc = static_cast<ucontext_t*>(ucontext_arg);
   auto* ctx = &uc->uc_mcontext;
 
-  // Dump registers and instruction at fault
-  u32 fault_instr = 0;
-  if (ctx->CTX_NIP)
-    fault_instr = *reinterpret_cast<const u32*>(ctx->CTX_NIP);
-  // JITPROBE disabled
+  // (fault_instr extracted here for debugging, currently unused)
+  // u32 fault_instr = 0;
+  // if (ctx->CTX_NIP)
+  //   fault_instr = *reinterpret_cast<const u32*>(ctx->CTX_NIP);
 
   uintptr_t access_addr = reinterpret_cast<uintptr_t>(info->si_addr);
 
@@ -195,7 +195,6 @@ static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
     return;
   }
 
-  // JITPROBE disabled
   if (g_jit_ppc64_instance)
   {
     // Dump code around the faulting instruction
@@ -767,15 +766,9 @@ void JitPPC64::WriteExceptionExit(u32 destination)
   m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET + 4));
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
 
-  // Record link data for potential block linking
-  auto* b = js.curBlock;
-  JitBlock::LinkData linkData;
-  linkData.exitAddress = destination;
-  linkData.linkStatus = false;
-  linkData.call = false;
-  linkData.exitPtrs = m_asm.Code() + m_asm.Size();
-  m_asm.BRel(m_dispatcher_lite);
-  b->linkData.push_back(linkData);
+  // Use JustWriteExit to emit the linkable exit (handles linkData internally)
+  JustWriteExit(destination, false, 0);
+  return;
 }
 
 // ===========================================================================
@@ -1522,6 +1515,9 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
 
   if (code_block.m_memory_exception)
     return;
+
+  fprintf(stderr, "JITPROBE: compiling block at 0x%08X (%u instr)\n",
+          em_address, code_block.m_num_instructions);
 
   // Per-instruction fallback: unhandled opcodes call FallBackToInterpreter
   // (no block-level reject gate).

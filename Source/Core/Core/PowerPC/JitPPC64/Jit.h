@@ -59,6 +59,7 @@ extern "C" void JitPPC64PsqStore(PowerPC::PowerPCState* state, PowerPC::MMU* mmu
 class JitPPC64;
 extern JitPPC64* g_jit_ppc64_instance;
 
+
 // State offsets computed at runtime via InitOffsets() — avoids
 // -Winvalid-offsetof on GCC (PowerPCState is non-standard-layout).
 extern u32 PC_OFFSET;
