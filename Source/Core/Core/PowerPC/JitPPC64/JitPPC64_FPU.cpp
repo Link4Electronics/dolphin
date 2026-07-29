@@ -199,5 +199,69 @@ bool JitPPC64::CompileFPUDouble(UGeckoInstruction inst)
   if (xo10 == 70)  { m_asm.MTFSB0(fb); return true; }
   if (xo10 == 38)  { m_asm.MTFSB1(fb); return true; }
 
+  if (xo10 == 64)
+    return CompileMcrfs(inst);
+
   return false;
+}
+
+namespace
+{
+void CallMcrfs(PowerPC::PowerPCState& state, u32 crfd, u32 crfs)
+{
+  const u32 shift = 4 * (7 - crfs);
+  const u32 field_value = (state.fpscr.Hex >> shift) & 0xF;
+  const u32 clear_mask = (0xF << shift) & (FPSCR_FX | FPSCR_ANY_X);
+  if (clear_mask)
+  {
+    state.fpscr.Hex &= ~clear_mask;
+    state.fpscr.VX = (state.fpscr.Hex & FPSCR_VX_ANY) != 0;
+    state.fpscr.FEX = ((state.fpscr.Hex >> 22) & (state.fpscr.Hex & FPSCR_ANY_E)) != 0;
+  }
+  state.cr.SetField(crfd, field_value);
+}
+}  // anonymous namespace
+
+bool JitPPC64::CompileMcrfs(UGeckoInstruction inst)
+{
+  const u32 shift = 4 * (7 - inst.CRFS);
+  const u32 clear_mask = (0xF << shift) & (FPSCR_FX | FPSCR_ANY_X);
+  const u32 crfd = inst.CRFD;
+
+  if (clear_mask == 0)
+  {
+    // No exception bits to clear — fully inline
+    m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(FPSCR_OFFSET));
+    // Extract 4-bit field value into low bits of REG_SCRATCH2 (r11)
+    m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH, (32 - shift) & 31, 28, 31);
+    // Load s_crTable base address into REG_SCRATCH (r0)
+    TrampMOVI64(m_asm, REG_SCRATCH,
+                reinterpret_cast<u64>(&PowerPC::ConditionRegister::s_crTable[0]));
+    // Multiply field value by 8 (left shift 3), mask to 6 bits
+    m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 3, 0, 28);
+    // LDX rt, ra, rb → GPR[rt] = MEM[GPR[ra] + GPR[rb]]
+    m_asm.LDX(REG_SCRATCH2, REG_SCRATCH, REG_SCRATCH2);
+    // Store to CR field
+    m_asm.STD(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(CR_OFFSET + crfd * 8));
+
+    if (crfd == 0)
+      m_cr0_native_valid = false;
+
+    return true;
+  }
+
+  // Complex case — call C helper
+  PrepareCall();
+  m_asm.MR(3, REG_PPC_BASE);
+  m_asm.LI32(4, crfd);
+  m_asm.LI32(5, inst.CRFS);
+  TrampMOVI64(m_asm, 12, reinterpret_cast<u64>(&CallMcrfs));
+  m_asm.MTCTR(12);
+  m_asm.BCTRL();
+  m_asm.LD(REG_PPC_BASE, REG_SP, 24);
+
+  if (crfd == 0)
+    m_cr0_native_valid = false;
+
+  return true;
 }

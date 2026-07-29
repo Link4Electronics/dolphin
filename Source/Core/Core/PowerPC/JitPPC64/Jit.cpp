@@ -779,6 +779,57 @@ void JitPPC64::WriteExceptionExit(u32 destination)
 }
 
 // ===========================================================================
+// WriteExceptionExitReg — exit block with runtime destination register
+//
+// Same as WriteExceptionExit but takes a host register (host_reg) containing
+// the destination PC value instead of a compile-time constant.
+// ===========================================================================
+
+void JitPPC64::WriteExceptionExitReg(u32 host_reg)
+{
+  gpr.Flush(js.op);
+  fpr.Flush(js.op);
+  FlushCarry();
+  FlushCR0IfDirty();
+
+  // Store destination to pc and npc (value already in host_reg)
+  m_asm.STW(host_reg, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
+  m_asm.STW(host_reg, REG_PPC_BASE, static_cast<s32>(PC_OFFSET + 4));
+
+  // Save LR and r12 between block frame slots
+  m_asm.MFLR(REG_SCRATCH2);
+  m_asm.STD(REG_SCRATCH2, REG_SP, 8);
+  m_asm.STD(REG_PPC_BASE, REG_SP, 16);
+
+  // Call CheckExceptionsFromJIT(m_system.GetPowerPC())
+  TrampMOVI64(m_asm, 3, reinterpret_cast<u64>(&m_system.GetPowerPC()));
+  TrampMOVI64(m_asm, 12, reinterpret_cast<u64>(&PowerPC::CheckExceptionsFromJIT));
+  m_asm.MTCTR(12);
+  m_asm.BCTRL();
+
+  // Restore r12 (REG_PPC_BASE — volatile across call)
+  m_asm.LD(REG_PPC_BASE, REG_SP, 16);
+
+  // Restore LR
+  m_asm.LD(REG_SCRATCH2, REG_SP, 8);
+  m_asm.MTLR(REG_SCRATCH2);
+
+  // Load NPC (may have been modified by CheckExceptionsFromJIT) and dispatch
+  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET + 4));
+  m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
+
+  // Record link data — exit address unknown at compile time
+  auto* b = js.curBlock;
+  JitBlock::LinkData linkData;
+  linkData.exitAddress = 0;
+  linkData.linkStatus = false;
+  linkData.call = false;
+  linkData.exitPtrs = m_asm.Code() + m_asm.Size();
+  m_asm.BRel(m_dispatcher_lite);
+  b->linkData.push_back(linkData);
+}
+
+// ===========================================================================
 // WriteConditionalExceptionExit — check a specific exception bit
 //
 // If the given exception bit is set in ppcState.Exceptions, flushes GPRs
@@ -1225,6 +1276,17 @@ void JitPPC64::EmitCR0Update(u32 host_reg)
   // last flush.  The full MFCR+LBZ+RLWINM+RLWIMI+MTCRF sequence is deferred
   // to FlushCR0IfDirty() — needed only on mfcr/mtcrf/mcrf/bc(bi=3)/block exit.
   m_cr0_native_valid = true;
+}
+
+void JitPPC64::EmitSetXER_OV(u32 r_ov)
+{
+  // r_ov must have 0 or 1 in bit 0 (the OV value).
+  // xer_so_ov byte format: bit 0 = OV, bit 1 = SO.
+  m_asm.RLWINM(r_ov, r_ov, 0, 31, 31);            // keep only bit 0
+  m_asm.LBZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(XER_SO_OV_OFFSET));
+  m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 0, 30);  // clear OV bit (PPC bit 31), keep SO
+  m_asm.OR(r_ov, r_ov, REG_SCRATCH2);
+  m_asm.STB(r_ov, REG_PPC_BASE, static_cast<s32>(XER_SO_OV_OFFSET));
 }
 
 // ===========================================================================

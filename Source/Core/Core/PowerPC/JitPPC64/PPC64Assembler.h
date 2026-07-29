@@ -26,10 +26,15 @@ public:
   }
 
   // -- Arithmetic (opcd=31, various XO) --
-  void ADD(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 266, rc)); }
-  void ADDO(u32 rd, u32 ra, u32 rb) { Write32(X(31, rd, ra, rb, 266, 1)); }
-  void ADDC(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 10, rc)); }
-  void ADDE(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 138, rc)); }
+  void ADD(u32 rd, u32 ra, u32 rb, bool rc = false, bool oe = false) {
+    Write32(X(31, rd, ra, rb, 266, rc) | (oe ? (1u << 10) : 0));
+  }
+  void ADDC(u32 rd, u32 ra, u32 rb, bool rc = false, bool oe = false) {
+    Write32(X(31, rd, ra, rb, 10, rc) | (oe ? (1u << 10) : 0));
+  }
+  void ADDE(u32 rd, u32 ra, u32 rb, bool rc = false, bool oe = false) {
+    Write32(X(31, rd, ra, rb, 138, rc) | (oe ? (1u << 10) : 0));
+  }
   void ADDIC(u32 rd, u32 ra, s32 sim) { Write32(D(12, rd, ra, sim)); }
   void ADDIC_(u32 rd, u32 ra, s32 sim) { Write32(D(13, rd, ra, sim)); }
   void ADDIS(u32 rd, u32 ra, s32 sim) { Write32(D(15, rd, ra, sim)); }
@@ -58,22 +63,44 @@ public:
       ORI(rd, rd, lo);      // rd = lo
     }
   }
-  void SUBF(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 40, rc)); }
-  void SUBFC(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 8, rc)); }
-  void SUBFE(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 136, rc)); }
-  void SUBFZE(u32 rd, u32 ra, bool rc = false) { Write32(X(31, rd, 0, ra, 200, rc)); }
-  void ADDZE(u32 rd, u32 ra, bool rc = false) { Write32(X(31, rd, 0, ra, 202, rc)); }
-  void SUBFME(u32 rd, u32 ra, bool rc = false) { Write32(X(31, rd, 0, ra, 232, rc)); }
-  void ADDME(u32 rd, u32 ra, bool rc = false) { Write32(X(31, rd, 0, ra, 234, rc)); }
+  void SUBF(u32 rd, u32 ra, u32 rb, bool rc = false, bool oe = false) {
+    Write32(X(31, rd, ra, rb, 40, rc) | (oe ? (1u << 10) : 0));
+  }
+  void SUBFC(u32 rd, u32 ra, u32 rb, bool rc = false, bool oe = false) {
+    Write32(X(31, rd, ra, rb, 8, rc) | (oe ? (1u << 10) : 0));
+  }
+  void SUBFE(u32 rd, u32 ra, u32 rb, bool rc = false, bool oe = false) {
+    Write32(X(31, rd, ra, rb, 136, rc) | (oe ? (1u << 10) : 0));
+  }
+  void SUBFZE(u32 rd, u32 ra, bool rc = false, bool oe = false) {
+    Write32(X(31, rd, 0, ra, 200, rc) | (oe ? (1u << 10) : 0));
+  }
+  void ADDZE(u32 rd, u32 ra, bool rc = false, bool oe = false) {
+    Write32(X(31, rd, 0, ra, 202, rc) | (oe ? (1u << 10) : 0));
+  }
+  void SUBFME(u32 rd, u32 ra, bool rc = false, bool oe = false) {
+    Write32(X(31, rd, 0, ra, 232, rc) | (oe ? (1u << 10) : 0));
+  }
+  void ADDME(u32 rd, u32 ra, bool rc = false, bool oe = false) {
+    Write32(X(31, rd, 0, ra, 234, rc) | (oe ? (1u << 10) : 0));
+  }
   void SUBFIC(u32 rd, u32 ra, s32 sim) { Write32(D(8, rd, ra, sim)); }
-  void NEG(u32 rd, u32 ra, bool rc = false) { Write32(X(31, rd, 0, ra, 104, rc)); }
+  void NEG(u32 rd, u32 ra, bool rc = false, bool oe = false) {
+    Write32(X(31, rd, 0, ra, 104, rc) | (oe ? (1u << 10) : 0));
+  }
   void MULLI(u32 rd, u32 ra, s32 sim) { Write32(D(7, rd, ra, sim)); }
-  void MULLW(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 235, rc)); }
+  void MULLW(u32 rd, u32 ra, u32 rb, bool rc = false, bool oe = false) {
+    Write32(X(31, rd, ra, rb, 235, rc) | (oe ? (1u << 10) : 0));
+  }
   void MULHW(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 75, rc)); }
   void MULHWU(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 11, rc)); }
   void MULHDU(u32 rd, u32 ra, u32 rb) { Write32(X(31, rd, ra, rb, 9, false)); }
-  void DIVW(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 491, rc)); }
-  void DIVWU(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 459, rc)); }
+  void DIVW(u32 rd, u32 ra, u32 rb, bool rc = false, bool oe = false) {
+    Write32(X(31, rd, ra, rb, 491, rc) | (oe ? (1u << 10) : 0));
+  }
+  void DIVWU(u32 rd, u32 ra, u32 rb, bool rc = false, bool oe = false) {
+    Write32(X(31, rd, ra, rb, 459, rc) | (oe ? (1u << 10) : 0));
+  }
 
   // -- Logical (opcd=31) --
   void AND(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 28, rc)); }

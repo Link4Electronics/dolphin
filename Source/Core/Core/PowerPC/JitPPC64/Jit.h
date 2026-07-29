@@ -189,6 +189,7 @@ private:
   // ---- FPU (JitPPC64_FPU.cpp) ----
   bool CompileFPUSingle(UGeckoInstruction inst);
   bool CompileFPUDouble(UGeckoInstruction inst);
+  bool CompileMcrfs(UGeckoInstruction inst);
 
   // ---- Misc/opcd 17/19 (JitPPC64_SystemRegisters.cpp) ----
   bool CompileSC(UGeckoInstruction inst);
@@ -200,6 +201,7 @@ private:
   void WriteExit(u32 destination, bool bl, u32 after);
   void JustWriteExit(u32 destination, bool bl = false, u32 after = 0);
   void WriteExceptionExit(u32 destination);
+  void WriteExceptionExitReg(u32 host_reg);
   void WriteConditionalExceptionExit(int exception);
   void WriteIdleExit();
   void WriteBLRExit();
@@ -242,6 +244,7 @@ private:
   void LoadCR(u32 host_reg);
   void StoreCR(u32 host_reg);
   void EmitCR0Update(u32 host_reg);
+  void EmitSetXER_OV(u32 r_ov);
   void EmitFakeTimeBase();
   void UpdateRoundingMode();
 

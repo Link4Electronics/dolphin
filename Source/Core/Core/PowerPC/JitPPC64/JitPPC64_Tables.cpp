@@ -118,7 +118,10 @@ void JitPPC64::CompileInstruction(PPCAnalyst::CodeOp& op)
     if (sub10 == 150)
       CompileISYNC(inst);
     else if (sub10 == 50)
-      FallBackToInterpreter(inst);
+    {
+      if (!CompileRFI(inst))
+        FallBackToInterpreter(inst);
+    }
     else if (bJITBranchOff) { FallBackToInterpreter(inst); break; }
     else
       CompileOPCD19(inst);

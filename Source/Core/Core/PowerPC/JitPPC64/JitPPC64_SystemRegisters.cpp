@@ -382,22 +382,72 @@ bool JitPPC64::CompileISYNC(UGeckoInstruction inst)
   return true;
 }
 
+namespace
+{
+void CallMSRUpdated(PowerPC::PowerPCManager& ppc)
+{
+  ppc.MSRUpdated();
+}
+}  // anonymous namespace
+
 // ===========================================================================
-// sc (opcd=17) — syscall → must deliver EXCEPTION_SYSCALL via interpreter
+// sc (opcd=17) — syscall → set EXCEPTION_SYSCALL and trigger exception exit
 // ===========================================================================
 
 bool JitPPC64::CompileSC(UGeckoInstruction inst)
 {
-  return false;
+  // Set ppcState.Exceptions |= EXCEPTION_SYSCALL
+  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(EXCEPTIONS_OFFSET));
+  m_asm.ORI(REG_SCRATCH, REG_SCRATCH, EXCEPTION_SYSCALL);
+  m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(EXCEPTIONS_OFFSET));
+
+  WriteExceptionExit(js.compilerPC + 4);
+  return true;
 }
 
 // ===========================================================================
-// rfi (opcd=19, SUBOP10=50) — return from interrupt → interpreter fallback
+// rfi (opcd=19, SUBOP10=50) — return from interrupt
+//
+// MSR = ((MSR & ~mask) | (SRR1 & mask)) & clearMSR13
+//   where mask = 0x87C0FFFF, clearMSR13 = 0xFFFBFFFF
+// NPC = SRR0
 // ===========================================================================
 
 bool JitPPC64::CompileRFI(UGeckoInstruction inst)
 {
-  return false;
+  constexpr u32 mask = 0x87C0FFFF;
+  constexpr u32 clearMSR13 = 0xFFFBFFFF;
+  constexpr u32 msr_preserve = (~mask) & clearMSR13;    // bits from old MSR
+  constexpr u32 srr1_extract = mask & clearMSR13;        // bits from SRR1
+
+  // r11 = ppcState.msr & msr_preserve
+  m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(MSR_OFFSET));
+  m_asm.LI32(REG_SCRATCH, msr_preserve);
+  m_asm.AND(REG_SCRATCH2, REG_SCRATCH2, REG_SCRATCH);
+
+  // r10 = ppcState.spr[SPR_SRR1] & srr1_extract  (use r10 as temp)
+  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_SRR1));
+  m_asm.LI32(10, srr1_extract);
+  m_asm.AND(REG_SCRATCH, REG_SCRATCH, 10);
+
+  // r0 = r11 | r0  → new MSR
+  m_asm.OR(REG_SCRATCH, REG_SCRATCH2, REG_SCRATCH);
+  m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(MSR_OFFSET));
+
+  // Call MSRUpdated() to update feature_flags and membase
+  PrepareCall();
+  TrampMOVI64(m_asm, 3, reinterpret_cast<u64>(&m_system.GetPowerPC()));
+  TrampMOVI64(m_asm, 12, reinterpret_cast<u64>(&CallMSRUpdated));
+  m_asm.MTCTR(12);
+  m_asm.BCTRL();
+  m_asm.LD(REG_PPC_BASE, REG_SP, 24);       // restore r12 after call
+
+  // NPC = SRR0
+  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_SRR0));
+
+  // Exit with runtime destination (SRR0) as the next PC
+  WriteExceptionExitReg(REG_SCRATCH);
+  return true;
 }
 
 // ===========================================================================
