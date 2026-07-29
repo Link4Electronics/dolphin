@@ -49,6 +49,10 @@ u32 FPSCR_OFFSET = 0;
 // Signal handler for MMIO backpatching
 JitPPC64* g_jit_ppc64_instance = nullptr;
 
+// Set by dispatcher just before MTCTR(3)/BCTR — SIGSEGV handler uses this
+// to compare the intended jump target against the actual fault address.
+const u8* volatile g_last_block_entry = nullptr;
+
 static struct sigaction s_old_sigsegv;
 
 // code_region address for signal handler debug output
@@ -200,6 +204,8 @@ static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
     // Dump code around the faulting instruction
     if (ctx->CTX_NIP)
       g_jit_ppc64_instance->DumpCode(reinterpret_cast<const u8*>(ctx->CTX_NIP) - 16, 48);
+    fprintf(stderr, "JIT: g_last_block_entry = %p (intended jump target)\n",
+            reinterpret_cast<const void*>(g_last_block_entry));
     g_jit_ppc64_instance->DoBacktrace();
   }
 
@@ -386,6 +392,9 @@ void JitPPC64::CompileDispatcher()
   // prolog can still read Run_LR and Jit.cpp's TOC from frame+16 and
   // frame+8 respectively.  SP remains at enter_code_SP - 32.
   m_asm.LD(10, 1, 24);           // restore r10 from dispatcher frame+24
+  // PROBE: save intended block entry to global before jumping
+  TrampMOVI64(m_asm, 0, reinterpret_cast<u64>(&g_last_block_entry));
+  m_asm.STD(3, 0, 0);
   m_asm.MTCTR(3);                // block → CTR
   m_asm.BCTR();                  // jump to block (LR = BCTR return address)
 
@@ -433,6 +442,9 @@ void JitPPC64::CompileDispatcher()
   // Success: tear down frame and jump to next block
   m_asm.ADDI(1, 1, FRAME_SIZE);
   m_asm.MTLR(14);
+  // PROBE: save intended block entry to global before jumping
+  TrampMOVI64(m_asm, 0, reinterpret_cast<u64>(&g_last_block_entry));
+  m_asm.STD(3, 0, 0);
   m_asm.MTCTR(3);
   m_asm.BCTR();
 
@@ -1522,9 +1534,11 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
   // Per-instruction fallback: unhandled opcodes call FallBackToInterpreter
   // (no block-level reject gate).
 
+  fprintf(stderr, "JITPROBE2: m_code_pos=%p m_code_end=%p\n", m_code_pos, m_code_end);
   size_t estimated_size = code_block.m_num_instructions * 128;
   if (m_code_pos + estimated_size > m_code_end)
   {
+    fprintf(stderr, "JITPROBE2: clear_cache path\n");
     if (clear_cache_and_retry_on_failure)
     {
       ClearCache();
@@ -1533,10 +1547,16 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
     return;
   }
 
+  fprintf(stderr, "JITPROBE2: AllocateBlock\n");
   JitBlock* b = m_block_cache.AllocateBlock(em_address);
   if (!b)
+  {
+    fprintf(stderr, "JITPROBE2: AllocateBlock returned NULL\n");
     return;
+  }
+  fprintf(stderr, "JITPROBE2: AllocateBlock OK\n");
 
+  fprintf(stderr, "JITPROBE2: SetBase\n");
   u8* block_start = m_code_pos;
   m_asm.SetBase(m_code_pos, static_cast<size_t>(m_code_end - m_code_pos));
 
@@ -1545,7 +1565,10 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
   b->near_end = block_start;
   js.curBlock = b;
 
+  fprintf(stderr, "JITPROBE2: EmitProlog\n");
   EmitProlog();
+
+  fprintf(stderr, "JITPROBE2: After EmitProlog, code size so far=%zu\n", m_asm.Size());
 
   m_constant_propagation.Clear();
   ResetFPRTypes();
@@ -1557,6 +1580,9 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
     g = false;
 
   js.downcountAmount = 0;
+
+  fprintf(stderr, "JITPROBE2: Starting instruction loop (%u instr)\n",
+          code_block.m_num_instructions);
 
   for (u32 i = 0; i < code_block.m_num_instructions; ++i)
   {
@@ -1593,19 +1619,25 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
 
     i += js.skipInstructions;
     js.skipInstructions = 0;
+
+    if (i % 10 == 0)
+      fprintf(stderr, "JITPROBE2: compiled instr %u/%u\n", i, code_block.m_num_instructions);
   }
 
+  fprintf(stderr, "JITPROBE2: EmitEpilog\n");
   EmitEpilog(nextPC);
 
+  fprintf(stderr, "JITPROBE2: clear_cache\n");
   u8* block_end = m_code_pos + m_asm.Size();
   __builtin___clear_cache(block_start, block_end);
 
   b->near_end = block_end;
 
+  fprintf(stderr, "JITPROBE2: FinalizeBlock\n");
   m_block_cache.FinalizeBlock(*b, jo.enableBlocklink, code_block, m_code_buffer);
   m_code_pos = block_end;
 
-  // JITPROBE disabled
+  fprintf(stderr, "JITPROBE2: block compiled OK\n");
 }
 
 // ===========================================================================

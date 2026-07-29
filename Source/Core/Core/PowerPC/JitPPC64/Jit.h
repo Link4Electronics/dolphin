@@ -41,6 +41,11 @@ inline void TrampMOVI64(PPC64Assembler& asm_, u32 rd, u64 imm)
   }
 }
 
+// Global probe: set by dispatcher just before jumping to a compiled block.
+// The SIGSEGV handler reads this to verify the intended jump target matches
+// where execution actually began.
+extern const u8* volatile g_last_block_entry;
+
 // C dispatch function — defined in JitPPC64_BackPatch.cpp
 extern "C" const u8* JitPPC64Dispatch(u32 pc);
 extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
