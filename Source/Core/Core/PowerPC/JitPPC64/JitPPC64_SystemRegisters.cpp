@@ -212,8 +212,12 @@ bool JitPPC64::CompileMFTB(UGeckoInstruction inst)
 
       u32 host_rd = gpr.W(rd);
       u32 host_nd = gpr.W(next.RD);
-      m_asm.LI(host_rd, 0);
-      m_asm.LI(host_nd, 0);
+      // Return real timebase values (already written by EmitFakeTimeBase),
+      // so r7 = TUB - TBL is correct for downstream code.
+      m_asm.LWZ(host_rd, REG_PPC_BASE,
+                static_cast<s32>(SPR_OFFSET + 4 * spr));
+      m_asm.LWZ(host_nd, REG_PPC_BASE,
+                static_cast<s32>(SPR_OFFSET + 4 * next_spr));
     }
   }
 

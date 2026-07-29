@@ -469,13 +469,21 @@ void JitPPC64::CompileDispatcher()
   // Restore callee-saved FPRs
   for (u32 i = 14; i <= 31; ++i)
     m_asm.LFD(i, 1, static_cast<s32>(CALLEE_SAVE_FPR_BASE + (i - 14) * 8));
-  // Load LR before tearing down frame (LR is at 16(r1) within the block frame)
-  m_asm.LD(REG_SCRATCH, 1, 16);
+  // Load LR into r11 (REG_SCRATCH2) before tearing down frame
+  // (r0 = REG_SCRATCH is also used below for STACK_PTR_OFFSET load)
+  m_asm.LD(REG_SCRATCH2, 1, 16);
+  // Load r10 from dispatcher frame+24 (Run's r10, saved once by enter_code).
+  // Must be done BEFORE ADDI — r10 was saved at enter_code_SP - 8, which is
+  // at block_SP + 376 (= enter_code_SP - FRAME_SIZE + 384 - 8).
+  m_asm.LD(10, 1, static_cast<s32>(FRAME_SIZE + 24 - 32));
   // Tear down block frame → now SP = dispatcher_SP (enter_code_SP - 32)
   m_asm.ADDI(1, 1, FRAME_SIZE);
-  // Load r10 from dispatcher frame+24 (Run's r10, saved once by enter_code)
-  m_asm.LD(10, 1, 24);
-  m_asm.MTLR(REG_SCRATCH);
+  // Restore clean Run_SP from STACK_PTR_OFFSET (saved by enter_code before
+  // creating the dispatcher frame).  Without this, BLR returns to Run()
+  // with SP = dispatcher_SP = Run_SP - 32, corrupting Run()'s stack access.
+  m_asm.LD(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(STACK_PTR_OFFSET));
+  m_asm.MR(REG_SP, REG_SCRATCH);
+  m_asm.MTLR(REG_SCRATCH2);
   m_asm.BLR();
 
   // ── Patch placeholder branch offsets ───────────────────────────────────
