@@ -185,35 +185,17 @@ static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
   u32 fault_instr = 0;
   if (ctx->CTX_NIP)
     fault_instr = *reinterpret_cast<const u32*>(ctx->CTX_NIP);
-  fprintf(stderr,
-          "JITPROBE: SIGSEGV addr=0x%lx nip=0x%lx r1=0x%lx r3=0x%lx "
-          "r11=0x%lx r12=0x%lx instr=0x%08X\n",
-          (unsigned long)info->si_addr, (unsigned long)ctx->CTX_NIP,
-          (unsigned long)ctx->CTX_GPR(1), (unsigned long)ctx->CTX_GPR(3),
-          (unsigned long)ctx->CTX_GPR(11), (unsigned long)ctx->CTX_GPR(12),
-          fault_instr);
-  fprintf(stderr,
-          "JITPROBE:   code_region=0x%lx (end=0x%lx) ppcState=0x%lx "
-          "nip-code=%+ld nip-ppcState=%+ld\n",
-          (unsigned long)(s_code_region ? s_code_region : nullptr),
-          (unsigned long)(s_code_region ? s_code_region + COMBINED_SIZE : 0),
-          (unsigned long)ctx->CTX_GPR(12),
-          s_code_region ? (long)(ctx->CTX_NIP - (unsigned long)s_code_region) : 0L,
-          (long)(ctx->CTX_NIP - (unsigned long)ctx->CTX_GPR(12)));
+  // JITPROBE disabled
 
   uintptr_t access_addr = reinterpret_cast<uintptr_t>(info->si_addr);
 
   if (g_jit_ppc64_instance && g_jit_ppc64_instance->HandleFault(access_addr, ctx))
   {
-    fprintf(stderr, "JITPROBE: SIGSEGV HANDLED addr=0x%lx nip=0x%lx\n",
-            (unsigned long)info->si_addr,
-            (unsigned long)ctx->CTX_NIP);
+    // JITPROBE disabled
     return;
   }
 
-  fprintf(stderr, "JITPROBE: SIGSEGV UNHANDLED addr=0x%lx nip=0x%lx — re-raising\n",
-          (unsigned long)info->si_addr,
-          (unsigned long)ctx->CTX_NIP);
+  // JITPROBE disabled
   if (g_jit_ppc64_instance)
   {
     // Dump code around the faulting instruction
@@ -578,22 +560,7 @@ void JitPPC64::EmitProlog()
   // interpreter may have changed RN since the last JIT block.
   UpdateRoundingMode();
 
-  // DEBUG: dump first 4 host instruction words of the fresh prolog
-  u32 pw0 = 0, pw1 = 0, pw2 = 0, pw3 = 0;
-  if (m_asm.Size() >= 16)
-  {
-    pw0 = *reinterpret_cast<const u32*>(m_asm.Code());
-    pw1 = *reinterpret_cast<const u32*>(m_asm.Code() + 4);
-    pw2 = *reinterpret_cast<const u32*>(m_asm.Code() + 8);
-    pw3 = *reinterpret_cast<const u32*>(m_asm.Code() + 12);
-  }
-  fprintf(stderr,
-          "JITPROBE: EmitProlog at code=0x%lx size=%zu "
-          "[0]=0x%08X [4]=0x%08X [8]=0x%08X [12]=0x%08X ppcState=0x%lx\n",
-          (unsigned long)m_asm.Code(), m_asm.Size(),
-          pw0, pw1, pw2, pw3,
-          (unsigned long)&m_ppc_state);
-  fflush(stderr);
+  // JITPROBE disabled
 }
 
 void JitPPC64::EmitEpilog(u32 next_pc)
@@ -1580,31 +1547,7 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
   m_block_cache.FinalizeBlock(*b, jo.enableBlocklink, code_block, m_code_buffer);
   m_code_pos = block_end;
 
-  fprintf(stderr, "JITPROBE: compiled block at 0x%08X, %u instrs, size=%zu bytes (code_pos=0x%lx, block_start=0x%lx, block_end=0x%lx), next=0x%08X\n",
-          em_address, code_block.m_num_instructions, m_asm.Size(),
-          (unsigned long)m_code_pos,
-          (unsigned long)block_start,
-          (unsigned long)block_end,
-          nextPC);
-  for (u32 i = 0; i < code_block.m_num_instructions; ++i)
-  {
-    if (!m_code_buffer[i].skip)
-    {
-      u32 addr = m_code_buffer[i].address;
-      u32 hex = m_code_buffer[i].inst.hex;
-      fprintf(stderr, "  [%02u] 0x%08X: 0x%08X\n", i, addr, hex);
-    }
-  }
-  // Dump host PPC64 instructions for debugging
-  fprintf(stderr, "JITPROBE: host code dump (%zu bytes):\n", m_asm.Size());
-  for (size_t i = 0; i < m_asm.Size(); i += 4)
-  {
-    u32 hw = 0;
-    if (i + 4 <= m_asm.Size())
-      hw = *reinterpret_cast<const u32*>(block_start + i);
-    fprintf(stderr, "  [%04zu] 0x%08X\n", i, hw);
-  }
-  fflush(stderr);
+  // JITPROBE disabled
 }
 
 // ===========================================================================
@@ -1660,16 +1603,7 @@ void JitPPC64::Run()
       // falls through to the dispatcher.  The dispatcher chains blocks
       // internally (via JitPPC64Dispatch + block linking) until
       // downcount ≤ 0, then returns to Run().
-      fprintf(stderr,
-              "JITPROBE: Run() calling enter_code at pc=0x%08X downcount=%d "
-              "ppcState=0x%lx enter_code=0x%lx\n",
-              m_ppc_state.pc, m_ppc_state.downcount,
-              (unsigned long)&m_ppc_state,
-              (unsigned long)m_enter_code);
       reinterpret_cast<void (*)()>(m_enter_code)();
-      fprintf(stderr,
-              "JITPROBE: Run() returned from enter_code at pc=0x%08X downcount=%d\n",
-              m_ppc_state.pc, m_ppc_state.downcount);
     }
   }
   UnprotectStack();

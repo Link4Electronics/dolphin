@@ -196,8 +196,6 @@ public:
     ptrdiff_t d = target - (m_code + m_pos);
     u32 li = (static_cast<u32>(d >> 2)) & 0x00FFFFFF;
     u32 instr = (18u << 26) | (li << 2);
-    fprintf(stderr, "JITPROBE: BRel m_code=%p m_pos=%zu target=%p d=%ld li=0x%06X instr=0x%08X\n",
-            (void*)m_code, m_pos, (void*)target, (long)d, li, instr);
     Write32(instr);
   }
   void BLRel(const u8* target)

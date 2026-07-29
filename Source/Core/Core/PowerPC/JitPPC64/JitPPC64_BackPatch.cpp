@@ -87,11 +87,7 @@ extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
   // which is the canonical address used by MMIO dispatch and GetSpanForAddress.
   const u32 phys_ea = ea & 0x3FFFFFFF;
 
-  fprintf(stderr,
-          "JITPROBE: TrampolineDispatcher ea=0x%08X phys_ea=0x%08X "
-          "is_store=%u size=%u rd=%u ra=%u val=0x%lx\n",
-          ea, phys_ea, is_store, access_size, rd, ra,
-          (unsigned long)store_value);
+  // JITPROBE disabled
 
   // Check for EFB/MMIO access (physical range 0x08000000-0x0FFFFFFF).
   // The interpreter uses the same check in WriteToHardware / ReadFromHardware.
@@ -282,9 +278,6 @@ extern "C" const u8* JitPPC64Dispatch(u32 pc)
   if (!jit)
     return nullptr;
 
-  WARN_LOG_FMT(POWERPC, "JIT: dispatch pc={:08x} downcount={}", pc,
-               jit->m_ppc_state.downcount);
-
   // Update the emulated timebase from CoreTiming before each block dispatch.
   // This ensures CompileMFTB's cached SPR reads return fresh values, and that
   // the timebase advances between loop iterations (even within the same slice,
@@ -374,15 +367,12 @@ bool JitPPC64::HandleFault(uintptr_t access_address, SContext* ctx)
                    fmt::ptr(area.fast_access_code), fmt::ptr(area.slow_access_code));
 
       m_fault_to_handler.erase(it);
-      fprintf(stderr, "JITPROBE: HandleFault success — patched fast path at %p, tramp at %p, %u entries remain\n",
-              (void*)area.fast_access_code, (void*)area.slow_access_code,
-              (unsigned)m_fault_to_handler.size());
+      // JITPROBE disabled
       return true;
     }
   }
 
-  fprintf(stderr, "JITPROBE: HandleFault FAILURE — no matching fast path for fault PC %p (%u entries in map)\n",
-          (void*)fault_pc, (unsigned)m_fault_to_handler.size());
+  // JITPROBE disabled
 
   // ---- Fallback: old backpatch table ----
   auto bp_it = std::find_if(s_backpatch_entries.begin(), s_backpatch_entries.end(),
@@ -392,7 +382,7 @@ bool JitPPC64::HandleFault(uintptr_t access_address, SContext* ctx)
 
   if (bp_it == s_backpatch_entries.end())
   {
-    fprintf(stderr, "JITPROBE: HandleFault FAILURE — no legacy backpatch entry either, returning false\n");
+    // JITPROBE disabled
     return false;
   }
 
