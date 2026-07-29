@@ -115,14 +115,16 @@ static void FreeCodeRegion(u8* ptr, size_t size)
 //   0(r1)  : backchain
 //   8(r1)  : saved CR (optional)
 //  16(r1)  : LR save (caller's frame)
-//  24(r1)  : TOC save (r2)
+//  24(r1)  : TOC / r12 save (ppcState)
 //  32(r1)..176(r1): callee-saved r14-r31 (18 × 8 = 144 bytes)
-// 176(r1)..192(r1): saved r10, r13, physical base
-// 192(r1)..336(r1): callee-saved FPRs f14-f31 (18 × 8 = 144 bytes)
-// 336(r1)        : saved guest EA (backpatch), PSQ EA, alignment
-// 384(r1)        : end of frame
+// 176(r1)      : saved r10 (clobbered by CompileBC as not-taken flag)
+// 184(r1)      : saved guest EA for backpatch (EA_SAVE_OFFSET)
+// 192(r1)      : PSQ EA save (PSQ_EA_SAVE_OFFSET)
+// 200(r1)..208(r1): saved r13 (PHYS_BASE_SAVE_OFFSET)
+// 208(r1)..352(r1): callee-saved FPRs f14-f31 (18 × 8 = 144 bytes)
+// 352(r1)..384(r1): spare
 static constexpr u32 FRAME_SIZE = 384;
-static constexpr s32 CALLEE_SAVE_FPR_BASE = 192;
+static constexpr s32 CALLEE_SAVE_FPR_BASE = 208;
 
 // ===========================================================================
 // JitPPC64BlockCache
@@ -454,9 +456,13 @@ void JitPPC64::CompileDispatcher()
   // ── m_dispatcher_exit: restore callee-saved regs and return to Run() ──
   // Called from dispatcher_lite when downcount ≤ 0 or block not found.
   // r1 = block_SP (frame intact — we haven't torn it down yet).
-  // r12 = &ppcState.  r14 = Run_LR.
+  // r12 = &ppcState.
+  //
+  // NOTE: r10 at block frame+176 is the NOT-TAKEN FLAG from the last
+  // block's CompileBC, NOT Run()'s r10.  We must tear down the block
+  // frame first, then load r10 from the dispatcher frame at SP+24
+  // (saved by enter_code).
   m_dispatcher_exit = m_asm.Code() + m_asm.Size();
-  m_asm.LD(10, 1, static_cast<s32>(CALLEE_SAVE_BASE + (31 - 14 + 1) * 8));
   m_asm.LD(REG_PHYS_BASE, 1, PHYS_BASE_SAVE_OFFSET);
   for (u32 i = 14; i <= 31; ++i)
     m_asm.LD(i, 1, static_cast<s32>(CALLEE_SAVE_BASE + (i - 14) * 8));
@@ -465,7 +471,10 @@ void JitPPC64::CompileDispatcher()
     m_asm.LFD(i, 1, static_cast<s32>(CALLEE_SAVE_FPR_BASE + (i - 14) * 8));
   // Load LR before tearing down frame (LR is at 16(r1) within the block frame)
   m_asm.LD(REG_SCRATCH, 1, 16);
+  // Tear down block frame → now SP = dispatcher_SP (enter_code_SP - 32)
   m_asm.ADDI(1, 1, FRAME_SIZE);
+  // Load r10 from dispatcher frame+24 (Run's r10, saved once by enter_code)
+  m_asm.LD(10, 1, 24);
   m_asm.MTLR(REG_SCRATCH);
   m_asm.BLR();
 
@@ -1311,6 +1320,11 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
       return;
     }
   }
+  // For update-form instructions (ra != 0), restore the original guest EA
+  // to REG_SCRATCH2 so that the caller's MR(gpr.W(ra), REG_SCRATCH2) copies
+  // the correct EA (not the host-translated address from the fast path).
+  if (ra != 0)
+    m_asm.LD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);
   const u8* fast_end = m_asm.Code() + m_asm.Size();
 
   // 2. Emit slow path in trampoline region
@@ -1398,6 +1412,11 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
   // [old_SP + 48] is NOT used because signal delivery or re-entrant
   // fault handling may have clobbered it.
   m_tramp_asm.LD(REG_PPC_BASE, 1, 24);
+
+  // Reload REG_PHYS_BASE (r13 = mem_ptr) — the C++ call to
+  // TrampolineDispatcher clobbered it (ELFv2 ABI treats r13 as TLS).
+  // Load from the block prolog's save at [SP + PHYS_BASE_SAVE_OFFSET].
+  m_tramp_asm.LD(REG_PHYS_BASE, 1, PHYS_BASE_SAVE_OFFSET);
 
   // Reload the result from ppcState: TrampolineDispatcher wrote
   // state->gpr[rd] (integer) or state->ps[rd] (FPU), but the

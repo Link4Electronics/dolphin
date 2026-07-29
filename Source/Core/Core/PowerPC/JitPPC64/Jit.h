@@ -452,7 +452,9 @@ private:
 
   // Stack frame layout offsets (from block SP)
   static constexpr s32 CALLEE_SAVE_BASE = 32;     // r14-r31 saves start here
-  static constexpr s32 EA_SAVE_OFFSET = 200;       // saved guest EA for backpatch
-  static constexpr s32 PHYS_BASE_SAVE_OFFSET = 208; // saved r13 (phys base)
+  // NOTE: order matters — do NOT rearrange these without updating the block
+  // frame layout in Jit.cpp.  r10 saves at 176; EA/r13/PSQ follow; FPRs after.
+  static constexpr s32 EA_SAVE_OFFSET = 184;       // saved guest EA for backpatch
   static constexpr s32 PSQ_EA_SAVE_OFFSET = 192;   // saved EA for psq integer helper call
+  static constexpr s32 PHYS_BASE_SAVE_OFFSET = 200; // saved r13 (phys base)
 };

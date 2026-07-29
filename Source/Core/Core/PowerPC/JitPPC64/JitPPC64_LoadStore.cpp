@@ -92,14 +92,17 @@ public:
     }
   }
 
-  // Complex (lambda): save CR/LR/r12, call CallLambdaTrampoline, restore
+  // Complex (lambda): save r10, r13, CR, r12; call CallLambdaTrampoline; restore
   void VisitComplex(const std::function<T(Core::System&, u32)>* lambda) override
   {
-    // Save CR (via r0) to sub-frame, create 32-byte stack frame
+    // Save r10 and r13 (clobbered by ELFv2 C++ ABI) BEFORE sub-frame
+    m_asm->STD(10, 1, -32);
+    m_asm->STD(JitPPC64::REG_PHYS_BASE, 1, -24);
+    // Save CR (via r0) and r12 to sub-frame
     m_asm->MFCR(JitPPC64::REG_SCRATCH);
     m_asm->STD(JitPPC64::REG_SCRATCH, 1, -16);
     m_asm->STD(JitPPC64::REG_PPC_BASE, 1, -8);
-    m_asm->STDU(1, 1, -32);
+    m_asm->STDU(1, 1, -48);
 
     // r3 = lambda pointer
     TrampMOVI64(*m_asm, 3, reinterpret_cast<u64>(lambda));
@@ -120,10 +123,12 @@ public:
     // Move result (r3) to destination host GPR
     m_asm->MR(m_host_reg, 3);
 
-    // Restore CR, r12, LR from sub-frame
-    m_asm->LD(JitPPC64::REG_SCRATCH, 1, 16);  // CR saved at old SP-16 = frame SP+16
-    m_asm->LD(JitPPC64::REG_PPC_BASE, 1, 24); // r12 saved at old SP-8 = frame SP+24
-    m_asm->ADDI(1, 1, 32);                     // tear down sub-frame
+    // Restore CR, r12, r13, r10 from sub-frame (reverse order)
+    m_asm->LD(JitPPC64::REG_SCRATCH, 1, 32);  // CR saved at old SP-16 = frame SP+32
+    m_asm->LD(JitPPC64::REG_PPC_BASE, 1, 40); // r12 saved at old SP-8 = frame SP+40
+    m_asm->LD(JitPPC64::REG_PHYS_BASE, 1, 24); // r13 saved at old SP-24 = frame SP+24
+    m_asm->LD(10, 1, 16);                      // r10 saved at old SP-32 = frame SP+16
+    m_asm->ADDI(1, 1, 48);                     // tear down sub-frame
     m_asm->MTCRF(0xFF, JitPPC64::REG_SCRATCH); // restore all CR fields
 
     // Reload LR from block prolog's save at SP+16
@@ -195,14 +200,17 @@ public:
     }
   }
 
-  // Complex (lambda): save CR/LR/r12, call CallLambdaTrampoline, restore
+  // Complex (lambda): save r10, r13, CR, r12; call CallLambdaTrampoline; restore
   void VisitComplex(const std::function<void(Core::System&, u32, T)>* lambda) override
   {
-    // Save CR (via r0), r12 to sub-frame
+    // Save r10 and r13 (clobbered by ELFv2 C++ ABI) BEFORE sub-frame
+    m_asm->STD(10, 1, -32);
+    m_asm->STD(JitPPC64::REG_PHYS_BASE, 1, -24);
+    // Save CR (via r0) and r12 to sub-frame
     m_asm->MFCR(JitPPC64::REG_SCRATCH);
     m_asm->STD(JitPPC64::REG_SCRATCH, 1, -16);
     m_asm->STD(JitPPC64::REG_PPC_BASE, 1, -8);
-    m_asm->STDU(1, 1, -32);
+    m_asm->STDU(1, 1, -48);
 
     // r3 = lambda pointer
     TrampMOVI64(*m_asm, 3, reinterpret_cast<u64>(lambda));
@@ -222,11 +230,13 @@ public:
     m_asm->MTCTR(12);
     m_asm->BCTRL();
 
-    // Restore CR, r12, LR from sub-frame
-    m_asm->LD(JitPPC64::REG_SCRATCH, 1, 16);
-    m_asm->LD(JitPPC64::REG_PPC_BASE, 1, 24);
-    m_asm->ADDI(1, 1, 32);
-    m_asm->MTCRF(0xFF, JitPPC64::REG_SCRATCH);
+    // Restore CR, r12, r13, r10 from sub-frame (reverse order)
+    m_asm->LD(JitPPC64::REG_SCRATCH, 1, 32);  // CR saved at old SP-16 = frame SP+32
+    m_asm->LD(JitPPC64::REG_PPC_BASE, 1, 40); // r12 saved at old SP-8 = frame SP+40
+    m_asm->LD(JitPPC64::REG_PHYS_BASE, 1, 24); // r13 saved at old SP-24 = frame SP+24
+    m_asm->LD(10, 1, 16);                      // r10 saved at old SP-32 = frame SP+16
+    m_asm->ADDI(1, 1, 48);                     // tear down sub-frame
+    m_asm->MTCRF(0xFF, JitPPC64::REG_SCRATCH); // restore all CR fields
 
     // Reload LR from block prolog's save at SP+16
     m_asm->LD(JitPPC64::REG_SCRATCH, 1, 16);

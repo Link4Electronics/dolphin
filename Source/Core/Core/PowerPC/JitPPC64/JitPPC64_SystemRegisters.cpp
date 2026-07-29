@@ -274,6 +274,8 @@ bool JitPPC64::CompileMisc(UGeckoInstruction inst)
     m_asm.BCTRL();
     // Reload r12 (REG_PPC_BASE) from block prolog save at [SP+24]
     m_asm.LD(REG_PPC_BASE, 1, 24);
+    // Reload r13 (REG_PHYS_BASE = mem_ptr) — clobbered by C++ ABI (r13 = TLS)
+    m_asm.LD(REG_PHYS_BASE, REG_PPC_BASE, static_cast<s32>(MEM_PTR_OFFSET));
     return true;
   }
   case 246: // dcbtst
