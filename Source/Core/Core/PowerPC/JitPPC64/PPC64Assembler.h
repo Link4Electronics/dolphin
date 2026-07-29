@@ -90,16 +90,23 @@ public:
   void NAND(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 476, rc)); }
   void NOR(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 124, rc)); }
   void EQV(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 284, rc)); }
-  void EXTSB(u32 rd, u32 ra, bool rc = false) { Write32(X(31, rd, 0, ra, 954, rc)); }
-  void EXTSH(u32 rd, u32 ra, bool rc = false) { Write32(X(31, rd, 0, ra, 922, rc)); }
-  void EXTSW(u32 rd, u32 ra, bool rc = false) { Write32(X(31, rd, 0, ra, 986, rc)); }
-  void CNTLZW(u32 rd, u32 ra, bool rc = false) { Write32(X(31, rd, 0, ra, 26, rc)); }
+  // EXTSB/EXTSH/EXTSW have a non-standard X-form where RS (source) is at
+  // PPC bits 6-10 (u32 25-21) and RA (destination) is at PPC bits 11-15
+  // (u32 20-16).  The X() helper maps rt→u32 25-21 (RS field) and ra→u32
+  // 20-16 (RA field), so we pass source as `rt` and dest as `ra`:
+  void EXTSB(u32 rd, u32 ra, bool rc = false) { Write32(X(31, ra, rd, 0, 954, rc)); }
+  void EXTSH(u32 rd, u32 ra, bool rc = false) { Write32(X(31, ra, rd, 0, 922, rc)); }
+  void EXTSW(u32 rd, u32 ra, bool rc = false) { Write32(X(31, ra, rd, 0, 986, rc)); }
+  void CNTLZW(u32 rd, u32 ra, bool rc = false) { Write32(X(31, ra, rd, 0, 26, rc)); }
 
   // -- Shift / Rotate (M-form) --
-  void SLW(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 24, rc)); }
-  void SRW(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 536, rc)); }
-  void SRAW(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, rd, ra, rb, 792, rc)); }
-  void SRAWI(u32 rd, u32 ra, u32 sh, bool rc = false) { Write32(X(31, rd, ra, sh, 824, rc)); }
+  // SLW/SRW/SRAW/SRAWI have RS (source) at PPC bits 6-10 (u32 25-21) and
+  // RA (destination) at PPC bits 11-15 (u32 20-16), same non-standard X-form
+  // as EXTSW.  Pass source as `rt` and dest as `ra`:
+  void SLW(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, ra, rd, rb, 24, rc)); }
+  void SRW(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, ra, rd, rb, 536, rc)); }
+  void SRAW(u32 rd, u32 ra, u32 rb, bool rc = false) { Write32(X(31, ra, rd, rb, 792, rc)); }
+  void SRAWI(u32 rd, u32 ra, u32 sh, bool rc = false) { Write32(X(31, ra, rd, sh, 824, rc)); }
 
   // rlwinm RA, RS, SH, MB, ME [, RC]
   void RLWINM(u32 ra, u32 rs, u32 sh, u32 mb, u32 me, bool rc = false)

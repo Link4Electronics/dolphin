@@ -438,6 +438,7 @@ public:
 private:
 
   // Stack frame layout offsets (from block SP)
+  static constexpr s32 R2_SAVE_OFFSET = 8;          // saved r2 (TOC) — free slot
   static constexpr s32 CALLEE_SAVE_BASE = 32;     // r14-r31 saves start here
   // NOTE: order matters — do NOT rearrange these without updating the block
   // frame layout in Jit.cpp.  r10 saves at 176; EA/r13/PSQ follow; FPRs after.

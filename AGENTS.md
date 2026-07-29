@@ -407,7 +407,7 @@ Functions fixed: `ExecuteL2capCmd`, `SignalChannel`, `ReceiveConnectionReq`, `Re
 | `Jit.cpp:1421` | `EmulateISI`: `nip = 0x00000400` → `0x80000400` |
 | `Jit.cpp:319` | Inner loop ISI injection: `m_ppc_state.pc = 0x00000400` → `0x80000400` |
 
-**Root cause:** All three exception vector addresses were set to physical addresses (`0x00000nnn`). Physical address `0x0` is not mappable on PPC64 (kernel forbids `MAP_FIXED` at `0x0` — `EPERM`). The NCE executable mapping only covers `0x70000000-0x82000000` (K2 + K1 cached). When `sigreturn` restored NIP to a physical address, the CPU immediately SIGSEGV'd on instruction fetch from unmapped memory, causing an infinite loop of SIGSEGV → DSI/ISI injection → repeat. Fix: use the K1 cached alias (`0x80000nnn`) which IS in the NCE mapping. The interpreter's `GetPointerForRange` masks with `0x3FFFFFFF`, so `0x80000nnn` maps to physical `0x00000nnn` for interpreter uses.
+**Root cause:** All three exception vector addresses were set to physical addresses (`0x00000nnn`). Physical address `0x0` is not mappable on PPC64 (kernel forbids `MAP_FIXED` at `0x0` — `EPERM`). The guest memory mapping only covers `0x70000000-0x82000000` (K2 + K1 cached). When `sigreturn` restored NIP to a physical address, the CPU immediately SIGSEGV'd on instruction fetch from unmapped memory, causing an infinite loop of SIGSEGV → DSI/ISI injection → repeat. Fix: use the K1 cached alias (`0x80000nnn`) which IS in the executable mapping. The interpreter's `GetPointerForRange` masks with `0x3FFFFFFF`, so `0x80000nnn` maps to physical `0x00000nnn` for interpreter uses.
 
 ## Known Remaining Issues
 
@@ -457,232 +457,6 @@ The JITPPC64 backend runs on PPC64 BE (PowerPC 970) with the following character
 - **ELFv2 ABI**: r2 (TOC), r13 (TLS) preserved across JIT code and restored by signal handlers and trampolines; callee-saved GPRs r14-r31 and FPRs f14-f31; stack frames require 16-byte alignment and LR at [SP+16]
 - **AltiVec VRs**: MSR[VR]=1 set at init; VRs are volatile across C++ ABI calls (not preserved)
 
-## Native Code Execution (NCE) for PPC64
-
-### Current Status
-
-Initial NCE stub skeleton is in `Source/Core/Core/PowerPC/JitPPC64/`. The NCE option appears as a CPU engine choice in the Qt GUI. Currently the trampoline is being debugged — the IPL first instruction is reached via the SHM-backed NCE mapping but crashes at MMIO access.
-
-### Architecture
-
-- **`JitPPC64`** class extends `JitBase` and implements `CPUCoreBase`
-- Reuses existing `JitCache` / `BlockCache` / `PPCAnalyst` infrastructure
-- Instruction selection tables mirror Jit64/JitArm64 structure
-- Signal handlers for SIGILL (Paired Singles, supervisor SPRs), SIGSEGV (MMIO), SIGALRM (timer), and SIGTRAP (debug traps)
-
-### Signal Handlers
-
-| Signal | Handler | Purpose |
-|--------|---------|---------|
-| SIGSEGV | `HandleSIGSEGV` | MMIO access, slowmem fallback, DSI emulation |
-| SIGILL | `HandleSIGILL` | Supervisor SPRs, Paired Singles, MSR[SF]=0 |
-| SIGALRM | `HandleSIGALRM` | Periodic downcount estimation (replaces interpreter loop) |
-| SIGTRAP | `HandleSIGTRAP` | Debug trap (for testing trampoline entry) |
-
-All handlers restore host r2 (TOC) and r13 (TLS) before any C++ member access.
-
-### NativeContext Layout (must match JitAsm.S)
-
-| Offset | Field | Size | Description |
-|--------|-------|------|-------------|
-| 0 | `host_r2` | 8 | Host TOC pointer |
-| 8 | `host_r13` | 8 | Host TLS pointer |
-| 16 | `host_r1` | 8 | Host stack pointer |
-| 24 | `return_addr` | 8 | Host LR (return address) |
-| 32 | `host_cr` | 8 | Host CR |
-| 40-176 | `host_gpr14_31` | 144 | Host callee-saved GPRs (18 × 8) |
-
-Total: 184 bytes, aligned to 16 bytes.
-
-### GuestRegs Layout (must match JitAsm.S)
-
-| Offset | Field | Size | Description |
-|--------|-------|------|-------------|
-| 0-127 | `gpr[32]` | 128 | Guest GPRs (each 4 bytes) |
-| 128 | `pc` | 4 | Guest PC (NIP) |
-| 132 | `cr` | 4 | Guest CR |
-| 136 | `lr` | 4 | Guest LR |
-| 140 | `ctr` | 4 | Guest CTR |
-| 144 | `xer` | 4 | Guest XER |
-
-### Critical Bug: .S File .text Not Executable on This System
-
-The PPC64 BE system (Arch Linux, kernel 7.1) **prevents execution from anonymous `MAP_PRIVATE` pages** and may also place separate `.text` sections from `.S` files in non-executable memory. This is likely due to a kernel security feature (`PaX MPROTECT`, `CONFIG_STRICT_MEMORY_RWX`, or similar).
-
-**Evidence from testing:**
-- `&JitPPC64EnterGuest` returns a valid address → reading via `*(volatile u32*)` gives correct value (0x7FE00008 = `trap`)
-- Calling via function pointer → SIGSEGV (core dumped), no signal handler output
-- `mprotect(page, PROT_READ|PROT_EXEC)` returns 0 but still SIGSEGV
-- `mmap(MAP_PRIVATE|MAP_ANONYMOUS, PROT_READ|PROT_WRITE|PROT_EXEC)` returns a valid page → writing `trap; blr` and calling it → SIGSEGV
-- The SHM-backed `MAP_SHARED` NCE mapping (created via `shm_open` + `mmap` with MAP_SHARED) **IS executable** — C function pointer test to 0x81200150 succeeded
-
-**Solution:** All NCE trampoline code must execute from the SHM-backed NCE mapping, not from `.text` sections of `.S` files. Either:
-1. Copy trampoline to the NCE mapping at init time and jump there, OR
-2. Use `asm()` at file scope in `.cpp` files (same `.text` as C++ code, proven executable)
-
-### Current NCE Test Flow (as of Jul 2026)
-
-1. `Run()` installs signal handlers, maps SHM-backed NCE memory, starts ALRM timer
-2. Inner loop: `FillGuestRegsForEntry`, check PC range, set `0x80003FF8 = &local_ctx`, copy trampoline to `0x80010000`, call `JitPPC64EnterGuest` via function pointer
-3. Trampoline saves host context (r2, r13, r1, LR, CR, r14-r31) to stack-local `NativeContext`, restores guest GPRs from `GuestRegs`, `bctr` to guest PC
-4. Guest executes natively in `0x80000000–0x82000000` range:
-   - `sc` → SIGILL → safety handler (nip+=4) — **skips syscall, breaks guest state**
-   - Supervisor SPR (mtspr/mfspr) → SIGILL → `HandleSIGILL` → `EmulateMFSpr`/`EmulateMTSpr`
-   - MMIO access → SIGSEGV → `HandleSIGSEGV` → MMIO read/write or slowmem
-   - ISI at unmapped address → SIGSEGV → `HandleSIGSEGV` → instruction-fetch shortcut → `EmulateDSI`
-5. ALRM fires every 2ms → `HandleSIGALRM` decrements downcount by 128. When downcount ≤ 0 and `0x80003FF8` points to a valid NativeContext (non-null, non-sentinel): save guest state, restore host regs, sigreturn to Run()
-6. Back in Run(): null-out `0x80003FF8`, copy back `m_native_ctx = local_ctx`, set sentinel. Continue inner while.
-7. If guest PC is outside `0x80000000–0x82000000`: check via `GetPointerForRange` — if valid, interpret one instruction; if invalid, inject ISI (set SRR0=PC, SRR1=MSR, clear MSR, PC=0x400)
-
-### Key NCE Fixes
-
-| Fix | File | Description |
-|-----|------|-------------|
-| `.S` → `asm()` in `.cpp` | `Jit.cpp:74-94` | `.S` .text not executable on PaX kernel; use file-scope `asm()` in `.cpp` |
-| `oris` base register | `Jit.cpp:78-79` | `li r12,0` before `oris r12,r12,0x8000` (PPC `oris` does NOT zero upper bits) |
-| No `sc` in asm entry | `Jit.cpp:87-94` | `sc` clobbers r3-r8 (kernel syscall ABI); signal args would be lost |
-| Sentinel return_addr | `Jit.cpp:275` | `m_native_ctx.return_addr = 0xFFFFFFFFFFFFFFFFULL` prevents ALRM from exiting during setup |
-| Null-out after enter | `Jit.cpp:288` | `*reinterpret_cast<...>(0x80003FF8) = nullptr` BEFORE copy-back closes ALRM race window |
-| Null-check in asm entries | `Jit.cpp:99-100,109-110` | `cmpdi r12,0; beq 1f` skips r2/r13 restore when 0x80003FF8 is null (prevents double fault) |
-| PC range fallback | `Jit.cpp:257-268` | Check PC outside NCE range before trampoline; if invalid address → ISI injection |
-| `_exit(1)` instead of EmulateDSI | `Jit.cpp:762` | Host-code SIGSEGV → `_exit(1)` instead of setting nip to 0x300 (guest DSI vector) |
-| Duplicate fprintf removed | `Jit.cpp:262-263` | Accidental double `fprintf` of "NCE: enter" message |
-| FPR save/restore for psq_l/st | `Jit.cpp:930-967,2042-2060` | `SaveFPRsFromContext`/`RestoreFPRToContext` — copies all 32 FPRs between ucontext and `m_ppc_state.ps[]`, splitting/packing Gekko two-float FPR format. Used in P0 else-branch for psq_l/st. |
-| CR/FPSCR save/restore in EmulatePairedSingle | `Jit.cpp:2495-2515` | `EmulatePairedSingle` now also saves/restores CR (`regs->ccr`) and FPSCR (`fp_regs[32]`) from ucontext before `FallBackToInterpreter`. |
-| BAT SPR array bounds fix | `Jit.cpp:2263-2276,2358-2375` | Both Gekko (528-543) and PPC970 (560-575) BAT SPR ranges now compute IBAT/DBAT indices independently for `[0..3]` instead of `[4..11]` (off-by-4 overflow bug). |
-| mfmsr/mtmsr P0 fix | `Jit.cpp:1965-2010` | Added `mfmsr` (xo=83) and `mtmsr` (xo=146) to `IsP0Instruction()` — they're valid PPC970 supervisor instructions (no SIGILL), now patched to `trap` → emulated via interpreter. |
-| PC advance after interpreter | `Jit.cpp:660-715` | Pre-entry `FallBackToInterpreter` paths (P0 check + PC-range check) now set `npc=pc+4` before and `pc=npc` after, matching `SingleStepInner` dispatch. Without this, `mfmsr` in P0 check looped forever. |
-| ps\_\* → AltiVec trampoline | `Jit.cpp:323-540,621-680` | `GeneratePsTrampolines()` at `0x7E000000` for ps\_add/sub/mul/mr: `stfd`→`lvx`→AltiVec→`stvx`→`lfd`→`b return`. `PatchAllP0` patches ps\_\* with `b trampoline` (AA=1) instead of `trap`. `MSR[VR]=1` set at `Run()` init. |
-
-### Known Blockers
-
-| Blocker | Cause | Workaround |
-|---------|-------|------------|
-| **sc not emulated (FIXED)** | SIGILL now routed to `HandleSIGILL` (was `nce_safety_handler` which skipped). `HandleSIGILL`'s existing `opcd==17` handler calls interpreter's `sc` handler → sets `EXCEPTION_SYSCALL` → `CheckExceptions` → `SRR0=pc+4`, `SRR1=msr`, `msr&=~0x04EF36`, `pc=0xC00`. |
-| **K2 not mapped (FIXED)** | `InitNCEGuestMapping` now maps `0x70000000-0x7FFFFFFF` (256MB, SHM offset 0=RWX). Inner loop range expanded from `0x80000000-0x82000000` to `0x70000000-0x82000000`. |
-| **Interrupt vectors** | Vectors at `0x00000000–0x00000FFF` — can't mmap at 0 on some kernels; run through interpreter fallback. On systems where `0x00000000` mmap succeeds, vectors are in the NCE physical mapping but outside the inner-loop range (pc < 0x70000000) so they still run through interpreter. |
-| **`trap` instructions in trampoline** | Two `trap` in `JitAsm.S` (entry + before `bctr`). No longer needed — removed. With `SIGILL` now routed to `HandleSIGILL`, `trap` + unknown opcd → exit to `Run()` instead of `nip+=4`, breaking first entry. |
-
-### Files
-
-- `Source/Core/Core/PowerPC/JitPPC64/Jit.cpp` — asm entries, all signal handlers, `Run()` inner loop, `Init()`
-- `Source/Core/Core/PowerPC/JitPPC64/JitAsm.S` — trampoline definition (`JitPPC64EnterGuest`)
-- `Source/Core/Core/PowerPC/JitPPC64/Jit.h` — struct/class declarations
-- `Source/Core/Core/HW/Memmap.cpp` — `InitNCEGuestMapping()`, `ShutdownNCEGuestMapping()`
-
-### Build Config
-
-The `_M_PPC_64` define is set when `_ARCH_64` and `CMAKE_SYSTEM_PROCESSOR` matches `powerpc64|ppc64|ppc64le`. This activates the `JitPPC64/` source files and the NCE CPU engine option.
-
-## Trap-and-Emulate Coverage (Gekko vs PPC970 ISA Gaps)
-
-The PPC970 (G5) lacks many Gekko/Broadway-specific instructions. NCE must trap them via SIGILL or SIGSEGV and emulate them. Below is the current coverage.
-
-### Instructions that DON'T SIGILL (silently wrong results — P0)
-
-These are the most dangerous. They execute as different instructions on PPC970.
-
-| Instruction | Gekko | PPC970 behavior | NCE impact |
-|-------------|-------|-----------------|------------|
-| **`dcbz`** (31, xo=1014) | Zero 32 bytes | Zero **128 bytes** — corrupts adjacent 96 bytes | Silent memory corruption. Cannot trap via SIGILL. Fix: page-protection trick or interpreter fallback for dcbz-heavy code. |
-| **`psq_l`/`psq_lu`** (opc 56/57) | Paired-single quantized load | Executes as `lq`/`lq_u` (Load Quadword, 16 bytes) | Wrong register values, 16-byte read instead of 8. No SIGILL. |
-| **`psq_st`/`psq_stu`** (opc 60/61) | Paired-single quantized store | Executes as `stq`/`stq_u` (Store Quadword, 16 bytes) | Wrong register values, 16-byte write → adjacent memory corruption. No SIGILL. |
-| **`mftb`** (31, xo=371) | Returns Dolphin's fake timebase | Returns real PPC970 timebase | Wrong frequency, breaks timing-dependent code. No SIGILL. |
-| **`mfspr PVR`** (SPR 287) | Returns `0x00007000` | Returns real PPC970 PVR (e.g. `0x0039xx`) | Game reads wrong CPU version. No SIGILL (user-readable on all PPC). |
-| **`mfspr TL/TU`** (SPR 268/269) | Dolphin's emulated timebase | Real PPC970 timebase | Same timing issue as `mftb`. |
-| **`mfmsr`** (31, xo=83) | Returns emulated Gekko MSR | Returns real PPC970 MSR | Wrong MSR bits (DR, IR, EE, etc.). Game reads real HW values, corrupting exception handling and MMU state. No SIGILL (valid supervisor instr). |
-| **`mtmsr`** (31, xo=146) | Writes emulated Gekko MSR | Writes real PPC970 MSR | Dangerous: can disable interrupts (EE), change endianness (LE), or modify host MMU bits. No SIGILL (valid supervisor instr). |
-| **`ps_*` arithmetic** (opc 4) | Paired-single FP ops | Executes as AltiVec Vector ops (opcd 4 is AltiVec primary) | Wrong results (different operation mapping). E.g. `ps_add` → `vaddfp` (correct!) but `ps_abs` → some other AltiVec op. Some have NO equivalent (ps_div). |
-| **`ps_mr`** (opc 4, xo=528) | Copy frB → frD | Some AltiVec op | Wrong register copy. |
-
-**Current fix for P0 items:** All P0 instructions are patched in RAM before NCE entry. Non-ps\_\* P0 instructions get `trap`→SIGILL→interpreter fallback. ps\_\* arithmetic (add/sub/mul/mr) get `b trampoline`→AltiVec native execution (avoids signal). Other ps\_\* (psq_l/st, ps_div, ps_abs/neg/nabs, ps_sel, etc.) get `trap`→SIGILL→interpreter fallback with FPR save/restore.
-
-### Instructions that SIGILL (P1 — currently handled)
-
-These trap via SIGILL and are emulated. Updated coverage in `HandleSIGILL`, `EmulateMFSpr`, `EmulateMTSpr`:
-
-| Instruction | Opcode/XO | Handler | Status |
-|-------------|-----------|---------|--------|
-| All `ps_*` paired singles | opc 4 | `EmulatePairedSingle` → `SaveFPRsFromContext` + `FallBackToInterpreter` + `RestoreFPRToContext`, also saves/restores CR and FPSCR | **OK** — FPR/CR/FPSCR state at ucontext boundary now correct |
-| `psq_l`/`psq_lu`/`psq_st`/`psq_stu` | opc 56/57/60/61 | P0 handler else-branch: `SaveFPRsFromContext` before interpreter, `RestoreFPRToContext(FD)` after for loads | **OK** — FPR state at ucontext boundary now correct |
-| `dcbz_l` (locked cache dcbz) | opc 4, xo=1014 | Falls under `IsPairedSingleOpcd(4)` → `FallBackToInterpreter` | **OK** (but mis-categorized) |
-| `mfspr`/`mtspr` (any SPR) | 31, xo=339/467 | `EmulateMFSpr`/`EmulateMTSpr` | **OK** — all Gekko SPRs now covered |
-| `mfmsr`/`mtmsr` | 31, xo=83/146 | `EmulateMFMSR`/`EmulateMTMSR` | **OK** — modifies m_guest.msr only, not real PPC970 MSR |
-| `mfsr`/`mtsr` | 31, xo=595/210 | Segment reg read/write | **OK** |
-| `rfi` | 19, xo=50 | `EmulateRFI` | **OK** |
-| `sc` (syscall) | opc 17 | `FallBackToInterpreter` | **OK** |
-| `dcbi` | 31, xo=470 | Calls `m_mmu.InvalidateDCacheLine(ea)` | **FIXED** (was no-op, now properly invalidates) |
-| `icbi` | 31, xo=982 | `FallBackToInterpreter` | **OK** |
-| `tlbie` | 31, xo=306 | `FallBackToInterpreter` | **OK** |
-| `tlbsync` | 31, xo=566 | `FallBackToInterpreter` | **OK** |
-| `mtsrin`/`mfsrin` | 31, xo=242/659 | `FallBackToInterpreter` | **OK** |
-| `eciwx`/`ecowx` | 31, xo=310/438 | `FallBackToInterpreter` (if unimplemented on PPC970 → SIGILL) | **OK** |
-| Paired single FP (opc 59/63) | — | NOT handled (don't SIGILL on PPC970). Native PPC970 FPU handles them | **OK** — standard PPC FP, correct native execution |
-| `mfdcr`/`mtdcr` | 31, xo=166/454 | `FallBackToInterpreter` (generic SIGILL handler) | **OK** — DCRA removed in ISA 2.01, always SIGILLs; interpreter returns 1 for "ready" |
-
-### SPR Coverage Added (2026-07-14)
-
-| SPR | Number | EmulateMFSpr | EmulateMTSpr | Notes |
-|-----|--------|-------------|-------------|-------|
-| GQR0-7 | 912-919 | Returns `m_ppc_state.spr[spr]` | Stores to `m_ppc_state.spr[spr]` | Graphics quantization, needed for psq_* interpreter fallback |
-| WPAR | 921 | Returns `m_ppc_state.spr[spr]` with BNE bit from GPFifo | Stores + calls `ResetGatherPipe()` | Write gather pipe (GP FIFO communication) |
-| DMAU | 922 | Returns `m_ppc_state.spr[SPR_DMAU]` | — (written via DMAL trigger) | DMA address |
-| DMAL | 923 | Returns `m_ppc_state.spr[SPR_DMAL]` | Full DMA emulation via `m_mmu.DMA_MemoryToLC`/`DMA_LCToMemory` | Locked cache DMA trigger |
-| ECID_U/M/L | 924-926 | Returns `m_ppc_state.spr[spr]` (set during Init) | — (read-only) | Chip ID |
-| UPMC1/USIA/UPMC2 | 937-939 | Returns PMC1/SIA/PMC2 | — (read-only aliases) | User-mode perf counter aliases |
-| UPMC3/UPMC4 | 941-942 | Returns PMC3/PMC4 | — (read-only aliases) | User-mode perf counter aliases |
-| PMC1-4 | 953-954, 957-958 | Returns PMC value | — | Performance monitor counters |
-| SIA | 955 | Returns SIA | — | Sampled Instruction Address |
-| IABR | 1010 | Returns `m_ppc_state.spr[SPR_IABR] & ~1` | — | Instruction breakpoint (TE bit clears on read) |
-| DABR | 1013 | Returns `m_ppc_state.spr[SPR_DABR]` | — | Data breakpoint |
-| ICTC | 1019 | Returns `m_ppc_state.spr[SPR_ICTC]` | Stores to `m_ppc_state.spr[SPR_ICTC]` | Instruction cache timing control |
-| THRM1-3 | 1020-1022 | Returns thermal value | Stores value (simplified — no thermal interrupt emulation) | Thermal monitoring |
-| SDR1 | 25 | — (handled by default fallback) | Stores + calls `m_mmu.SDRUpdated()` | Page table base |
-| EAR | 282 | — (handled by default fallback) | Stores to `m_ppc_state.spr[SPR_EAR]` | External Access Register |
-| MMCR0/MMCR1 | 952/956 | Returns `m_guest.mmcr0`/`mmcr1` (existing) | Stores + calls `PowerPC::MMCRUpdated(m_ppc_state)` | Performance monitor control |
-
-### Commit History
-
-| Date | File(s) | Change |
-|------|---------|--------|
-| 2026-07-15a | `Jit.cpp`, `Jit.h` | **FPR save/restore**: Added `SaveFPRsFromContext` (copy all 32 FPRs from ucontext to `m_ppc_state.ps[]`, splitting Gekko packed 64-bit FPR into two doubles) and `RestoreFPRToContext` (pack one FPR back). Used in P0 psq_l/st path and `EmulatePairedSingle`. Added CR/FPSCR save/restore to `EmulatePairedSingle`. |
-| 2026-07-15b | `Jit.cpp` | **BAT SPR off-by-4 fix**: Both `EmulateMFSpr` and `EmulateMTSpr` computed IBAT/DBAT array indices incorrectly using `idx` directly (DBAT) or `4+idx` (PPC970 range), overflowing the `[8]` arrays. Fixed: compute independent `idx` for IBAT vs DBAT, staying in `[0..3]`. |
-| 2026-07-15c | `Jit.cpp` | **mfdcr/mtdcr handler (REMOVED)**: Added XO=166/454 handlers for DCRA polling, but the stuck instruction was `mfmsr`, not `mfdcr`. Removed in 2026-07-15d. |
-| 2026-07-15d | `Jit.cpp` | **mfmsr/mtmsr P0 fix + PC advance fix**: Added `mfmsr` (xo=83) and `mtmsr` (xo=146) to `IsP0Instruction()` — these are valid PPC970 supervisor instructions that don't SIGILL, returning the real PPC970 MSR instead of the emulated Gekko MSR. Also fixed pre-entry `FallBackToInterpreter` paths (P0 check + PC-range check) to properly advance `m_ppc_state.pc` after interpreter execution: `npc=pc+4` before, `pc=npc` after — matching `Interpreter::SingleStepInner` dispatch. Without this, `mfmsr` in the P0 check path would loop forever because the interpreter handler doesn't modify PC. Removed dead mfdcr/mtdcr SIGILL chain handlers. |
-| 2026-07-15e | `Jit.cpp`, `Jit.h` | **ps\_\* → AltiVec trampoline prototype**: Generate native AltiVec trampolines in the NCE K2 mapping at `0x7E000000` for ps\_add/sub/mul/mr. Each 64-byte trampoline does `stfd` FPRs→scratch → `lvx`→VRs → `vaddfp`/`vsubfp`/`vmulfp`/`vor` → `stvx`→`lfd` back → `b addr+4`. ps\_\* sites are patched with `b trampoline_addr` (absolute, AA=1) instead of `trap`, avoiding the ~2µs SIGILL round-trip. `PatchAllP0`/`UnpatchAllP0` handle both branch-patched (ps\_\*) and trap-patched (other P0) instructions with the same restore-from-map mechanism. `MSR[VR]=1` is set once at `Run()` init via `mtmsrd` so AltiVec instructions execute without a Vector Unavailable exception. |
-| 2026-07-14a | `Source/Core/Core/PowerPC/JitPPC64/Jit.cpp` | Added all missing Gekko SPRs to `EmulateMFSpr`/`EmulateMTSpr` (GQR0-7, WPAR, DMAU, DMAL, ECID, UPMC, PMC, SIA, IABR, DABR, ICTC, THRM, SDR1, EAR, MMCR). Fixed `dcbi` to call `InvalidateDCacheLine`. Added MSR[DR]/MSR[IR] logging in `HandleSIGALRM`. Added `#include Core/HW/GPFifo.h` for WPAR/BNE access. |
-| 2026-07-14b | `Source/Core/Core/PowerPC/JitPPC64/Jit.cpp` | **MSR[DR]/MSR[IR] hypothesis refuted**: added logging in `HandleSIGALRM` — always DR/IR=0/0. Replaced `_exit(1)` with `EmulateDSI` in the unhandled-fault path in `HandleSIGSEGV`. **Pre-check fault address before `SlowmemDataAccess`**: if the fault address is outside valid guest memory (RAM or EXRAM), inject DSI directly instead of calling `SlowmemDataAccess` (which silently drops invalid accesses and corrupts guest state). Added `valid_addr` helper that checks both RAM and EXRAM ranges via 30-bit mask. |
-| 2026-07-14c | `Source/Core/Core/PowerPC/JitPPC64/Jit.cpp`, `Jit.h` | **IPL vector address fix**: DSI/ISI vectors at `0x80000300`/`0x80000400` are zeroed (no IPL code at SHM offset 0x300/0x400). Changed to `0x81200200`/`0x81200300` (IPL file offsets 0x300/0x400 → physical 0x01200200/0x01200300). |
-| 2026-07-14d | `Source/Core/Core/PowerPC/JitPPC64/Jit.cpp`, `Jit.h` | **IPL vector injection is fundamentally broken on real PPC970**: `mfspr SRR0` reads the **real** PPC970 SPR, not our emulated `m_guest.srr0`. Linux SIGSEGV delivery does NOT save SRR0/SRR1 in the ucontext (`pt_regs`). The IPL handler uses stale/garbage return address → crash. **Fix**: replaced ALL IPL vector injection with `ExitNCEFromSignal()` — restores host registers from NativeContext and returns to `Run()` loop, which handles the fault via interpreter fallback. Changed: Run() loop ISI injection → `FallBackToInterpreter`; SIGSEGV instruction-fetch path → `ExitNCEFromSignal`; all 3 `EmulateDSI` call sites → `ExitNCEFromSignal`. Added `ExitNCEFromSignal()` helper method in `JitPPC64`. |
-| 2026-07-14e | `Jit.cpp` | **ExitNCEFromSignal re-entry fix**: Moved `m_ppc_state.pc` from unconditionally `pc_val` to `skip_instruction ? (pc_val + 4) : pc_val`. Data faults (skip=true) now advance past the faulting instruction to prevent infinite re-entry loop. Instruction-fetch faults (skip=false) keep pc for interpreter fallback. |
-| 2026-07-14f | `Jit.cpp` | **MMIO handler opcode coverage**: Added all missing D-form load/store opcodes to the MMIO handler in `HandleSIGSEGV`: lwzu(33), lbzu(35), lhzu(41), lhau(43), stwu(37), stbu(39), sthu(45), lmw(46), stmw(47). Update-form opcodes do MMIO access + RA write-back. Multiple opcodes (lmw/stmw) access consecutive words starting from D-form EA. **Temporary stack fix**: In `Run()` loop, if `m_ppc_state.gpr[1] == 0`, set to `0x80100000` before NCE entry to prevent infinite loop from `stwu` with r1=0 accessing `0xFFFFFFF0`. |
-| 2026-07-14g | `Memmap.cpp`, `Jit.cpp` | **K2 uncached mapping** at 0xB0000000-0xBFFFFFFF (256MB, SHM offset 0). Guest code can branch into K2 uncached territory (e.g., 0xB7240470). Added mapping, range checks, shutdown unmap, and MAPS filter. |
-| 2026-07-14h | `Jit.cpp` | **EXRAM-aware range checks**: Both Run() loop guards now handle K1 block 1 (0x90000000) and K1 uncached block 1 (0xD0000000) by checking against `exram_size` instead of `ram_size`. **Interpreter fallback safety**: Before calling `Memory::Read_U32(m_ppc_state.pc)` in the interpreter fallback path, validates the address against RAM/EXRAM ranges to prevent Unknown Pointer crash when NCE exits at a non-mapped K1 block 1 address (e.g., Luigi's Mansion at 0x97A10470). |
-
-## NCE vs JIT Performance Analysis
-
-**NOTE:** The JITPPC64 backend (described below) compiles **all** ps\_\* instructions via AltiVec — no trap overhead. This NCE section is historical and describes the trap-based approach used by the NCE subsystem (JITPPC64's predecessor). The NCE and JIT backends are independent; the JIT is the primary engine.
-### Trap-and-Emulate vs AltiVec JIT for Missing Instructions
-
-PPC970 (G5) lacks Gekko-specific instructions (Paired Singles, dcbz with 32-byte zero, mftb, mfspr PVR/TL/TU). The **JITPPC64 backend** (described below) handles all of these:
-
-- **Paired singles**: **All** ps\_\* arithmetic, compare, select, merge, sum, reciprocal, and quantized load/store compiled inline via AltiVec (VADDFP/VSUBFP/VMULFP/VDIVFP/VREFP/VRSQRTEFP/VSEL/VCMPGEFP/VCMPEQFP/VCMPGTFP/VMRGHW/VMRGLW/VSPLTW/VMADDFP) and native scalar FPU (FCMPU/FCMPO for compares). psq_l/st quantize types 0-4 (float, u8, u16, s8, s16) compiled inline using LFIWAX/STFIWX/FCTIWZ/FRSP + shifts. C helpers only as runtime-GQR-change fallback. **Zero interpreter fallback.**
-- **dcbz**: Compiled as 8 word-stores (emulates 32B on PPC970's 128B dcbz)
-- **mftb/mfspr TL/TU**: Compiled as plain LWZ from cached SPR array (timebase refreshed before each block dispatch)
-- **mfspr PVR**: Emulated via mfspr → interpreter fallback
-
-The **NCE** subsystem (a separate, predecessor engine) uses signal-handler-based trapping and is largely superseded by JITPPC64.
-
-### NCE Speed Estimate (historical — JIT compiles all ps\_\* via AltiVec)
-
-| Component | CachedInterpreter | JITPPC64 | NCE (trap) |
-|-----------|------------------|----------|------------|
-| ALU/Load/Store/Branch | ~30 cycles/instr | ~1 cycle | ~1 cycle |
-| Paired Singles | ~50 cycles | ~50 cycles (AltiVec) | ~5000 cycles (SIGILL) |
-| dcbz | ~30 cycles | ~8 cycles (8 word-stores) | ~2 cycles (4-instr) |
-| mftb/TL/TU | ~20 cycles | ~1 cycle (LWZ from SPR cache) | ~5000 cycles (SIGILL) |
-| MMIO | ~40 cycles | ~5-50 cycles (inline or SIGSEGV) | ~5000 cycles (SIGSEGV) |
-| Supervisor SPR | ~40 cycles | ~1 cycle (MTSPR/MFSPR) or block fallback | ~5000 cycles (SIGILL) |
 
 ## Session 2026-07-16: JITPPC64 File Split + Build Fixes
 
@@ -897,27 +671,36 @@ The loop exits when the 64-bit timebase value is within 0x1124 of a 32-bit bound
 
 The timebase advances by ~1 tick per block iteration (14 instructions / 12 timer ratio), so the TBL overflow condition is reached after ~2 billion iterations = ~60 seconds of emulated speed. On the G5 at JIT speed, this takes about 1–2 minutes of wall time.
 
-### Stack Frame Layout (for exit sequence correctness)
+### Stack Frame Layout (current — FRAME_SIZE=384)
 
 ```
-[Run()'s SP + 16]  = LR saved by Run()'s BL to m_enter_code
-[enter_code SP]    = Run()'s SP - 32
-[enter_code + 16]  = LR saved by block prolog (MFLR + STD before STDU)
-[enter_code + 24]  = r10 saved by enter_code
-[block SP]         = enter_code SP - 256 (Run's SP - 288)
+[Run()'s SP]       = caller SP when Run() calls enter_code (BL)
+[Run()'s SP - 32]  = enter_code SP  (enter_code does STDU -32)
+[enter_code + 16]  = Run_LR saved by enter_code (MFLR + STD)
+[enter_code + 24]  = Run's r10 saved by enter_code
+[enter_code - 384] = block SP  (block prolog does STDU -FRAME_SIZE)
+[block + 16]       = Run_LR saved by block prolog (MFLR + STD)
 [block + 32..176]  = r14..r31 saved by block prolog (CALLEE_SAVE_BASE=32, 18 × 8)
-[block + 176]      = r10 saved by block prolog
+[block + 176]      = r10 (not-taken flag) saved by block prolog
 ```
 
-The shared exit sequence:
-1. `LD r10 from block+176`, `LD r14..r31 from block+32..168` (block SP)
-2. `ADDI(1,1,256)` → SP = enter_code SP
-3. `LD REG_SCRATCH from SP+16` = LR saved by prolog
-4. `MTLR`, `BLR` → returns to `Run()`
+Two frames exist: enter_code's 32-byte persistent frame, and the block's 384-byte frame.
+
+### m_dispatcher_exit (current exit path)
+
+Called from `m_dispatcher_lite` when downcount ≤ 0 or block not found.
+
+1. Restore r14..r31, f14..f31, REG_PHYS_BASE from block_SP offsets
+2. `LD(REG_SCRATCH, 1, 16)` — LR from block_SP+16 (= Run_LR)
+3. `LD(10, 1, FRAME_SIZE + 24)` — r10 from block_SP+FRAME_SIZE+24 (= enter_code_SP+24 = Run_SP-8)
+4. `ADDI(1, 1, FRAME_SIZE + 32)` — tear down BOTH frames → SP = Run_SP
+5. `MTLR(REG_SCRATCH); BLR()` — return to Run() with correct SP, LR, r10
 
 ## Session 2026-07-18 (late): RLDICR/RLDICL `sh[5]` bit-placement bugs
 
-### The bug(s)
+**Current status: Fixed.** The encoding in `PPC64Assembler.h` now matches the kernel's `PPC_RAW_RLDICL`/`PPC_RAW_RLDICR` macros (`((sh >> 5) & 1) << 1` for `sh[5]`, xo at bits 2-4). Verified against `/usr/src/linux/arch/powerpc/include/asm/ppc-opcode.h`. The `TrampMOVI64` 64-bit immediate load that uses these instructions produces correct results for all address values.
+
+### History of the bug
 
 `PPC64Assembler.h:RLDICR()` and `RLDICL()` had `sh[5]` at the wrong bit in **three different attempts**:
 
@@ -1180,4 +963,37 @@ On unhandled SIGSEGV (before re-raising with `SIG_DFL`), the handler now calls:
 |---------|--------|
 | **Inline MMIO for complex handlers** | Requires saving all volatile GPRs/FPRs and calling C++ lambda from JIT code — complex ABI work with limited benefit (most MMIO handlers are Direct or Constant) |
 | **FPR type tracking → codegen decisions** | Infrastructure is in place but unused by emit code — needs `psq_l/st` optimization pass |
+
+## Session 2026-07-29: m_dispatcher_exit Frame-Offset Fix
+
+### Root Cause: Two-Frame Exit Path
+
+`enter_code` creates a persistent 32-byte dispatcher frame at `Run_SP - 32`, saving LR and r10 there. Each JIT block creates its own 384-byte frame below that. The `m_dispatcher_exit` path only tore down the 384-byte block frame (`ADDI(1, 1, FRAME_SIZE)`), leaving the 32-byte dispatcher frame intact. Return to `Run()` happened with `SP = Run_SP - 32` instead of `SP = Run_SP`, corrupting all of `Run()`'s local variable accesses (string pointer for fprintf, etc.), causing the PLT stub crash.
+
+### Diagnosis
+
+- `LD(10, 1, 24)` after `ADDI(1, 1, FRAME_SIZE)` read from `enter_code_SP + 24 = Run_SP - 8` — this IS the correct location of the saved r10 (by coincidence), since after ADDI `SP = enter_code_SP`.
+- But returning to `Run()` with `SP = Run_SP - 32` makes `Run()`'s own frame teardown access wrong offsets, crashing on the first `Run()` local variable access (fprintf).
+
+### Fix (Jit.cpp:472-480)
+
+```cpp
+// Old: tear down block frame only, then load r10 from wrong SP
+m_asm.LD(REG_SCRATCH, 1, 16);
+m_asm.ADDI(1, 1, FRAME_SIZE);
+m_asm.LD(10, 1, 24);
+m_asm.MTLR(REG_SCRATCH);
+m_asm.BLR();
+
+// New: load LR and r10 BEFORE teardown, tear down BOTH frames
+m_asm.LD(REG_SCRATCH, 1, 16);         // LR from block_SP+16
+m_asm.LD(10, 1, FRAME_SIZE + 24);     // r10 from block_SP+FRAME_SIZE+24
+m_asm.ADDI(1, 1, FRAME_SIZE + 32);    // tear down block + dispatcher frames
+m_asm.MTLR(REG_SCRATCH);
+m_asm.BLR();
+```
+
+### Remaining Concern: r2 (TOC) Corruption
+
+If crash persists, add r2 save/restore to `m_dispatcher_exit` — the JIT code calls `JitPPC64Dispatch` (a C++ function) via `BCTRL`, which may clobber r2. When returning to `Run()` via the exit path, `Run()` expects its own TOC. On ELFv2, the compiler may or may not reload r2 after the call depending on cross-module optimization.
 

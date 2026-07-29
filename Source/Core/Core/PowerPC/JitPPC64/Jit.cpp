@@ -348,12 +348,15 @@ void JitPPC64::CompileDispatcher()
   m_asm.MR(REG_SCRATCH, REG_SP);
   m_asm.STD(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(STACK_PTR_OFFSET));
 
-  // Save LR (Run_LR) and r10 to the dispatcher frame.  The frame persists
+  // Save LR, r2 (TOC), and r10 to the dispatcher frame.  The frame persists
   // for the entire JIT chain — every dispatcher re-entry via block BRel
   // jumps to m_dispatcher_entry and does NOT overwrite these saves.
+  // r2 must be restored before returning to Run() because JitPPC64Dispatch
+  // (in a different compilation unit) clobbers it on ELFv2.
   m_asm.MFLR(REG_SCRATCH);
   m_asm.STDU(1, 1, -32);
   m_asm.STD(REG_SCRATCH, 1, 16);  // save LR at frame+16
+  m_asm.STD(2, 1, 8);             // save r2 (TOC) at frame+8
   m_asm.STD(10, 1, 24);           // save r10 at frame+24
 
   // ── dispatcher entry (called from enter_code or block BRel) ──────────
@@ -398,24 +401,23 @@ void JitPPC64::CompileDispatcher()
   m_asm.BC(12, 2, 0);  // BO=12 (true), BI=2 (EQ) → beq
 
   // ── Success path: jump to block entry ──────────────────────────────────
-  // Load LR and r10 from the dispatcher frame BEFORE tearing it down.
-  // The dispatcher frame is at enter_code_SP - 32; LR is at frame+16.
-  m_asm.LD(REG_SCRATCH, 1, 16);  // load Run_LR from dispatcher frame+16
+  // Keep the dispatcher frame intact (don't ADDI SP) so that the block
+  // prolog can still read Run_LR and Jit.cpp's TOC from frame+16 and
+  // frame+8 respectively.  SP remains at enter_code_SP - 32.
   m_asm.LD(10, 1, 24);           // restore r10 from dispatcher frame+24
-  m_asm.ADDI(1, 1, 32);          // SP = enter_code_SP
-  m_asm.MTLR(REG_SCRATCH);       // restore Run_LR (block prolog will re-save it)
   m_asm.MTCTR(3);                // block → CTR
-  m_asm.BCTR();                  // jump to block (LR = Run_LR)
+  m_asm.BCTR();                  // jump to block (LR = BCTR return address)
 
   // ── Exit path: return to Run() ────────────────────────────────────────
   const u8* exit_pos = m_asm.Code() + m_asm.Size();
   // SP is still dispatcher_frame_SP = enter_code_SP - 32.
-  // Load LR and r10 from the dispatcher frame, then restore SP to clean
-  // enter_code_SP (no block frames to unwind — block epilog already restored).
+  // Load LR, r2 (TOC), and r10 from the dispatcher frame, then restore SP
+  // to clean enter_code_SP (no block frames to unwind — block epilog
+  // already restored).
   m_asm.LD(14, 1, 16);           // load LR from dispatcher frame+16
+  m_asm.LD(2, 1, 8);             // restore r2 (TOC) from frame+8
   m_asm.LD(10, 1, 24);           // load r10 from dispatcher frame+24
-  m_asm.LD(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(STACK_PTR_OFFSET));
-  m_asm.MR(REG_SP, REG_SCRATCH); // restore enter_code_SP
+  m_asm.LD(REG_SP, 1, 0);        // load backchain = original Run_SP from SP+0
   m_asm.MTLR(14);                // restore Run_LR
   m_asm.BLR();                   // return to Run()
 
@@ -455,13 +457,14 @@ void JitPPC64::CompileDispatcher()
 
   // ── m_dispatcher_exit: restore callee-saved regs and return to Run() ──
   // Called from dispatcher_lite when downcount ≤ 0 or block not found.
-  // r1 = block_SP (frame intact — we haven't torn it down yet).
+  // r1 = block_SP = dispatcher_SP - FRAME_SIZE (frame intact — we haven't
+  // torn it down yet).  The dispatcher frame is always above the block
+  // frame (the entry success path no longer tears it down).
   // r12 = &ppcState.
   //
-  // NOTE: r10 at block frame+176 is the NOT-TAKEN FLAG from the last
-  // block's CompileBC, NOT Run()'s r10.  We must tear down the block
-  // frame first, then load r10 from the dispatcher frame at SP+24
-  // (saved by enter_code).
+  // Run_LR and Jit.cpp's TOC are saved at block_SP+16 and block_SP+8
+  // respectively (set by the block prolog from the dispatcher frame).
+  // Run's r10 is at block_SP+FRAME_SIZE+24 (dispatcher frame+24).
   m_dispatcher_exit = m_asm.Code() + m_asm.Size();
   m_asm.LD(REG_PHYS_BASE, 1, PHYS_BASE_SAVE_OFFSET);
   for (u32 i = 14; i <= 31; ++i)
@@ -469,12 +472,13 @@ void JitPPC64::CompileDispatcher()
   // Restore callee-saved FPRs
   for (u32 i = 14; i <= 31; ++i)
     m_asm.LFD(i, 1, static_cast<s32>(CALLEE_SAVE_FPR_BASE + (i - 14) * 8));
-  // Load LR before tearing down frame (LR is at 16(r1) within the block frame)
+  // Load Run_LR and TOC from block frame saves (set by block prolog)
   m_asm.LD(REG_SCRATCH, 1, 16);
-  // Tear down block frame → now SP = dispatcher_SP (enter_code_SP - 32)
-  m_asm.ADDI(1, 1, FRAME_SIZE);
-  // Load r10 from dispatcher frame+24 (Run's r10, saved once by enter_code)
-  m_asm.LD(10, 1, 24);
+  m_asm.LD(2, 1, static_cast<s32>(R2_SAVE_OFFSET));
+  // Load Run's r10 from dispatcher frame+24 (= block_SP+FRAME_SIZE+24)
+  m_asm.LD(10, 1, static_cast<s32>(FRAME_SIZE + 24));
+  // Tear down both block frame (FRAME_SIZE) and dispatcher frame (32)
+  m_asm.ADDI(1, 1, FRAME_SIZE + 32);
   m_asm.MTLR(REG_SCRATCH);
   m_asm.BLR();
 
@@ -516,13 +520,19 @@ void JitPPC64::CompileDispatcher()
 
 void JitPPC64::EmitProlog()
 {
-  // STDU must come BEFORE STD — matching the enter_code pattern.
-  // STDU allocates the frame and stores backchain; STD then saves LR at
-  // new_SP + 16 (within the callee's frame).  dispatcher_lite's LD(14,1,16)
-  // loads from this same offset.
-  m_asm.MFLR(REG_SCRATCH);
+  // Load Run_LR and Jit.cpp's TOC from the dispatcher frame (at SP+16 and
+  // SP+8 respectively) BEFORE allocating the block frame.  The dispatcher
+  // frame is always present because the entry success path no longer tears
+  // it down.  dispatcher_lite's LD(14,1,16) later reads Run_LR from the
+  // block's LR save.
+  //
+  // On ELFv2, JitPPC64Dispatch (a different compilation unit) clobbers r2,
+  // so we must save Run()'s TOC here and restore it before returning.
+  m_asm.LD(REG_SCRATCH, 1, 16);                  // r0 = dispatcher LR save = Run_LR
+  m_asm.LD(REG_SCRATCH2, 1, 8);                  // r11 = dispatcher r2 save = Jit.cpp TOC
   m_asm.STDU(1, 1, -static_cast<s32>(FRAME_SIZE));
-  m_asm.STD(REG_SCRATCH, 1, 16);
+  m_asm.STD(REG_SCRATCH, 1, 16);                 // save Run_LR at block_SP+16
+  m_asm.STD(REG_SCRATCH2, 1, static_cast<s32>(R2_SAVE_OFFSET));  // save TOC at block_SP+8
 
   // Save r10 (clobbered by CompileBC as not-taken flag) and r13 (physical base)
   m_asm.STD(10, 1, static_cast<s32>(CALLEE_SAVE_BASE + (31 - 14 + 1) * 8));
