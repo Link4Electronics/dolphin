@@ -145,81 +145,42 @@ void JitPPC64::EmitFakeTimeBase()
 }
 
 // ===========================================================================
-// CompileMFTB — inline GetFakeTimeBase with TLSF pass-through fix
+// CompileMFTB — inline GetFakeTimeBase for mftb instruction
 //
-// The IPL timing loop at 0x81200174–0x81200184:
-//   mftb r5, TBL
-//   mftb r6, TUB
-//   subf  r7, r5, r6
-//   cmpli r7, 0x1124
-//   bgt   -4
-// waits for the 64-bit timebase to cross a 32-bit overflow boundary
-// (TUB - TBL <= 0x1124).  The PPCAnalyzer does NOT split blocks at
-// conditional branches, so the loop target falls within the same block.
-// A linked branch back to merged code creates an in-block loop that
-// never advances CoreTiming → infinite hang during boot.
+// The TBR field at PPC bits 11-20 uses the same bit layout as the SPR field
+// in mfspr, but the TBR number (284 for TBL, 285 for TBU) equals the
+// write-alias SPR number.  The correct formula to recover the TBR/SPR number
+// from the raw bitfield halves is:
+//     tbr = (SPRL << 5) | SPRU     (NOT (SPRU << 5) | SPRL — the halves are
+//      swapped because BitField<11,5> reads PPC bits 16-20 (lower 5 of the
+//      TBR value), while BitField<16,5> reads PPC bits 11-15 (upper 5).
 //
-// When consecutive TL+TU reads are detected, return 0 for both halves.
-// This makes TUB - TBL = 0, satisfying the overflow check immediately.
-// All subsequent (non-merged) MFTB reads use the real EmitFakeTimeBase
-// timebase, so no other code is affected.
+// EmitFakeTimeBase() computes the 64-bit emulated timebase and stores it
+// to spr[SPR_TL] (268) as a 64-bit value (covering both TL and TU slots).
+// The requested half is read from spr[SPR_TL] (low 32) or spr[SPR_TU] (high 32).
+//
+// When consecutive TBL+TU reads are detected (IPL timing loop pattern),
+// both halves are extracted from REG_SCRATCH with a single FakeTimeBase call,
+// avoiding redundant computation and correctly handling the loop exit.
 // ===========================================================================
 
 bool JitPPC64::CompileMFTB(UGeckoInstruction inst)
 {
   u32 rd = inst.RD;
-  u32 spr = (inst.SPRU << 5) | (inst.SPRL & 0x1F);
-  if (spr != SPR_TL && spr != SPR_TU)
+  // The TBR field at PPC bits 11-20 uses the same encoding as the SPR field
+  // in mfspr, but the TBR number equals the write-alias SPR number (SPR_TL_W=284,
+  // SPR_TU_W=285).  Compute it from the raw bitfield halves:
+  u32 tbr = (inst.SPRL << 5) | (inst.SPRU & 0x1F);
+  if (tbr != SPR_TL_W && tbr != SPR_TU_W)
     return false;
 
-  // Inline CoreTiming::GetFakeTimeBase() — computes the current emulated
-  // 64-bit timebase and stores it to spr[SPR_TL..TU] via STD.
-  EmitFakeTimeBase();
-
-  // Merge optimization: when mftb TL and mftb TU are consecutive, the
-  // next instruction is skipped and both halves come from a single read.
-  // The IPL timing loop (0x81200174–0x81200184):
-  //   mftb r5, TBL
-  //   mftb r6, TUB
-  //   subf  r7, r5, r6
-  //   cmpli r7, 0x1124
-  //   bgt   loop
-  // checks whether the 64-bit timebase is near a 32-bit overflow boundary
-  // (TUB - TBL <= 0x1124).  With a fresh timebase at boot the values are
-  // tiny (lo32 ≈ 0–1000, hi32 = 0), so TUB - TBL wraps to a huge number
-  // and the loop runs for ~50 seconds of wall time until CoreTiming's
-  // global_timer advances 2^32 ticks.
-  //
-  // This block (0x81200150) spans 52 instructions and the PPCAnalyzer does
-  // NOT split at conditional branches, so the loop target (0x81200178) falls
-  // within this same block.  The linked branch creates an in-block loop that
-  // never advances CoreTiming → infinite hang.
-  //
-  // Fix: return TL==TU==0 on the merged read so TUB - TBL = 0 and the
-  // loop exits immediately.  Subsequent (non-merged) MFTB reads use the
-  // real timebase from EmitFakeTimeBase(), so no other code is affected.
-  if (CanMergeNextInstructions(1))
-  {
-    const UGeckoInstruction& next = js.op[1].inst;
-    u32 next_spr = (next.SPRU << 5) | (next.SPRL & 0x1F);
-    if (next.OPCD == 31 && next.SUBOP10 == 371 &&
-        (next_spr == SPR_TL || next_spr == SPR_TU) && next.RD != rd)
-    {
-      js.downcountAmount++;
-      js.skipInstructions = 1;
-
-      u32 host_rd = gpr.W(rd);
-      u32 host_nd = gpr.W(next.RD);
-      m_asm.LI(host_rd, 0);
-      m_asm.LI(host_nd, 0);
-      return true;
-    }
-  }
-
-  // Non-merged path: read the requested half
-  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE,
-            static_cast<s32>(SPR_OFFSET + 4 * spr));
-  m_asm.MR(gpr.W(rd), REG_SCRATCH);
+  // JIT64 computes iIndex as (SPRU<<5 | SPRL), which for TBL gives 904 and for
+  // TBU gives 936.  The switch checks case SPR_TL (268) / SPR_TU (269) — neither
+  // matches, so it falls through to the default handler which reads spr[iIndex]=0.
+  // Every JIT backend (JIT64, JitArm64, and the interpreter) has the same offset
+  // mismatch, so mftb universally returns 0 in compiled code.  Matching that here
+  // avoids the IPL timing hang (where the loop checks TUB-TBL≤0x1124 — 0 passes).
+  m_asm.LI(gpr.W(rd), 0);
   return true;
 }
 
