@@ -1478,18 +1478,8 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
   if (code_block.m_memory_exception)
     return;
 
-  // Only compile blocks where ALL instructions can be JITted
-  for (u32 i = 0; i < code_block.m_num_instructions; ++i)
-  {
-    if (m_code_buffer[i].skip)
-      continue;
-    if (!CanCompileInstruction(m_code_buffer[i].inst))
-    {
-      NOTICE_LOG_FMT(POWERPC, "JITPPC64: can't compile block at {:08x} (instr {:08x} opcd={} at +{})",
-                     em_address, m_code_buffer[i].inst.hex, m_code_buffer[i].inst.OPCD, i);
-      return;
-    }
-  }
+  // Per-instruction fallback: unhandled opcodes call FallBackToInterpreter
+  // (no block-level reject gate).
 
   size_t estimated_size = code_block.m_num_instructions * 64;
   if (m_code_pos + estimated_size > m_code_end)
@@ -1717,7 +1707,75 @@ bool JitPPC64::CompileTable31(UGeckoInstruction inst)
   return CompileMisc(inst);
 }
 
-void JitPPC64::FallBackToInterpreter(UGeckoInstruction inst) {}
+void JitPPC64::FallBackToInterpreter(UGeckoInstruction inst)
+{
+  // Flush everything before calling C++ (interpreters reads all guest state)
+  FlushCarry();
+  gpr.Flush();
+  fpr.Flush();
+
+  if (js.op->canEndBlock)
+  {
+    m_asm.LI32(REG_SCRATCH, js.compilerPC);
+    m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
+    m_asm.LI32(REG_SCRATCH, js.compilerPC + 4);
+    m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET + 4));
+  }
+
+  const Interpreter::Instruction instr = Interpreter::GetInterpreterOp(inst);
+
+  // Save LR + r12 across the C++ call
+  m_asm.MFLR(REG_SCRATCH2);
+  m_asm.STD(REG_SCRATCH2, REG_SP, 8);
+  m_asm.STD(REG_PPC_BASE, REG_SP, 16);
+
+  // ELFv2 ABI: r3 = this, r4 = inst.hex, r12 = function pointer
+  TrampMOVI64(m_asm, 3, reinterpret_cast<u64>(&m_system.GetInterpreter()));
+  m_asm.LI32(4, inst.hex);
+  TrampMOVI64(m_asm, 12, reinterpret_cast<u64>(instr));
+  m_asm.MTCTR(12);
+  m_asm.BCTRL();
+
+  // Restore r12 and LR
+  m_asm.LD(REG_PPC_BASE, REG_SP, 16);
+  m_asm.LD(REG_SCRATCH2, REG_SP, 8);
+  m_asm.MTLR(REG_SCRATCH2);
+
+  // Reload r13 (REG_PHYS_BASE = mem_ptr) — clobbered by C++ ABI
+  m_asm.LD(REG_PHYS_BASE, REG_PPC_BASE, static_cast<s32>(MEM_PTR_OFFSET));
+
+  // Reset caches — interpreter may have changed any register
+  gpr.Reset();
+  fpr.Reset();
+  m_constant_propagation.ClearGPRs(js.op->regsOut);
+
+  // Exit if NPC changed (exception triggered)
+  if (js.op->canEndBlock)
+  {
+    if (js.isLastInstruction)
+    {
+      WriteExceptionExit(js.compilerPC);
+    }
+    else
+    {
+      m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET + 4));
+      m_asm.LI32(REG_SCRATCH2, js.compilerPC + 4);
+      m_asm.CMPLW(0, REG_SCRATCH, REG_SCRATCH2);
+      const u8* beq_pos = m_asm.Code() + m_asm.Size();
+      m_asm.BC(12, 2, 0);  // beq skip
+      WriteExceptionExit(js.compilerPC);
+      const u8* after_handler = m_asm.Code() + m_asm.Size();
+      const s32 beq_bd = static_cast<s32>(after_handler - beq_pos);
+      u32 enc = (16u << 26) | ((12u & 0x1F) << 21) | ((2u & 0x1F) << 16) |
+                (((beq_bd >> 2) & 0x3FFF) << 2);
+      std::memcpy(const_cast<u8*>(beq_pos), &enc, sizeof(enc));
+    }
+  }
+  else if (ShouldHandleFPExceptionForInstruction(js.op))
+  {
+    WriteConditionalExceptionExit(EXCEPTION_PROGRAM);
+  }
+}
 void JitPPC64::DoNothing(UGeckoInstruction inst) {}
 void JitPPC64::UnknownInstruction(UGeckoInstruction inst) {}
 

@@ -50,9 +50,6 @@ inline void TrampMOVI64(PPC64Assembler& asm_, u32 rd, u64 imm)
   }
 }
 
-// Forward declaration — defined in JitPPC64_Tables.cpp
-bool CanCompileInstruction(UGeckoInstruction inst);
-
 // C dispatch function — defined in JitPPC64_BackPatch.cpp
 extern "C" const u8* JitPPC64Dispatch(u32 pc);
 extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
