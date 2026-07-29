@@ -273,7 +273,6 @@ public:
   // Debug helpers
   void DumpCode(const u8* start, size_t size);
   void DoBacktrace();
-  void DumpBlockTrace();
 
 private:
 
