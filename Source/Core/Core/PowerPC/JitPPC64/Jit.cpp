@@ -1532,6 +1532,7 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
     PPCAnalyst::CodeOp& op = m_code_buffer[i];
     js.compilerPC = op.address;
     js.op = &op;
+    js.instructionsLeft = static_cast<int>(code_block.m_num_instructions - i - 1);
     js.downcountAmount += op.opinfo->num_cycles;
 
     if (op.skip)
