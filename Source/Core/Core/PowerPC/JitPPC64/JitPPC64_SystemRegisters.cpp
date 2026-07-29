@@ -243,25 +243,60 @@ bool JitPPC64::CompileMisc(UGeckoInstruction inst)
   case 86:  // dcbf
   case 470: // dcbi
   {
-    // Flush all guest state before C call
-    PrepareCall();
-    // Compute EA into r3
+    // Compute EA into r11 (REG_SCRATCH2), save to stack
     if (inst.RA == 0)
-      m_asm.MR(3, gpr.R(inst.RB));
+      m_asm.MR(REG_SCRATCH2, gpr.R(inst.RB));
     else
-      m_asm.ADD(3, gpr.R(inst.RA), gpr.R(inst.RB));
-    // Move EA to r4 (second arg)
-    m_asm.MR(4, 3);
-    // r3 = &jit_interface
+      m_asm.ADD(REG_SCRATCH2, gpr.R(inst.RA), gpr.R(inst.RB));
+    m_asm.STW(REG_SCRATCH2, REG_SP, EA_SAVE_OFFSET);
+
+    // Check ValidBlockBitSet: skip the expensive C call when no JIT block
+    // exists at this cache line.  Cache line index = EA >> 5.
+    // ValidBlockBitSet layout: u32 array indexed by (EA >> 10), bit at (EA>>5)&31.
+    TrampMOVI64(m_asm, REG_SCRATCH2,
+                reinterpret_cast<u64>(GetBlockCache()->GetBlockBitSet()));
+    // Save EA back into r0 (r11 now holds bitset base)
+    m_asm.LWZ(REG_SCRATCH, REG_SP, EA_SAVE_OFFSET);
+    m_asm.SRW(3, REG_SCRATCH, 10);  // r3 = EA >> 10 (word index)
+    m_asm.SLW(3, 3, 2);             // r3 = word_index * 4
+    m_asm.LWZX(3, REG_SCRATCH2, 3); // r3 = valid_block[word_index] (ra=r11 ≠ 0 → GPR[11])
+    m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 27, 27, 31);  // r0 = bitpos = (EA>>5)&31
+    m_asm.LI(REG_SCRATCH2, 1);
+    m_asm.SLW(REG_SCRATCH2, REG_SCRATCH2, REG_SCRATCH);  // r11 = 1 << bitpos
+    m_asm.AND(REG_SCRATCH, 3, REG_SCRATCH2, true);       // test bit, sets CR0
+
+    const u8* bc_pos = m_asm.Code() + m_asm.Size();
+    m_asm.BC(12, 2, 0);  // placeholder: branch if EQ (bit NOT set) → skip
+
+    // --- Invalidation needed: block exists at this cache line ---
+    PrepareCall();
+    m_asm.LWZ(4, REG_SP, EA_SAVE_OFFSET);  // r4 = EA (second arg)
     TrampMOVI64(m_asm, 3, reinterpret_cast<u64>(&m_system.GetJitInterface()));
     TrampMOVI64(m_asm, 12,
                 reinterpret_cast<u64>(&JitInterface::InvalidateICacheLineFromJIT));
     m_asm.MTCTR(12);
     m_asm.BCTRL();
-    // Reload r12 (REG_PPC_BASE) from block prolog save at [SP+24]
+    // Reload r12 (REG_PPC_BASE) and r13 (REG_PHYS_BASE) — clobbered by BCTRL
     m_asm.LD(REG_PPC_BASE, 1, 24);
-    // Reload r13 (REG_PHYS_BASE = mem_ptr) — clobbered by C++ ABI (r13 = TLS)
     m_asm.LD(REG_PHYS_BASE, REG_PPC_BASE, static_cast<s32>(MEM_PTR_OFFSET));
+
+    const u8* call_end = m_asm.Code() + m_asm.Size();
+    m_asm.B(0);  // placeholder: branch to done
+
+    // --- Patch the BC placeholder to jump to done (skip invalidate) ---
+    {
+      const u8* done_pos = m_asm.Code() + m_asm.Size();
+      s32 bd = static_cast<s32>(done_pos - bc_pos);
+      *reinterpret_cast<u32*>(const_cast<u8*>(bc_pos)) =
+          (16u << 26) | (12u << 21) | (2u << 16) |
+          ((bd >> 2) & 0x3FFF) << 2;
+      // Patch the B placeholder at call_end to jump to done
+      bd = static_cast<s32>(done_pos - call_end);
+      *reinterpret_cast<u32*>(const_cast<u8*>(call_end)) =
+          (18u << 26) | ((bd >> 2) & 0x00FFFFFF) << 2;
+    }
+
+    m_asm.ISYNC();
     return true;
   }
   case 246: // dcbtst
@@ -291,7 +326,7 @@ bool JitPPC64::CompileMisc(UGeckoInstruction inst)
   case 982: // icbi — too rare to JIT; falls to interpreter which calls
             // JitInterface::InvalidateICacheLine via the icbi handler
     return false;
-  case 1014: // dcbz — PPC970 zeros 128B, not 32B → emulate with 8 word-stores
+  case 1014: // dcbz — PPC970 zeros 128B, not 32B → emulate with 2× AltiVec STVX
   {
     // EA = (RA ? GPR[RA] : 0) + GPR[RB]
     if (inst.RA == 0)
@@ -302,30 +337,27 @@ bool JitPPC64::CompileMisc(UGeckoInstruction inst)
     }
 
     // Low dcbz hack: skip zeroing for [0x80000000, 0x80008000) range.
-    // Check: (EA - 0x80000000) < 0x8000  (unsigned 32-bit)
     const u8* skip_branch = nullptr;
     if (m_low_dcbz_hack)
     {
       m_asm.LI32(REG_SCRATCH, 0x80000000);
       m_asm.SUBF(REG_SCRATCH, REG_SCRATCH, REG_SCRATCH2);
       m_asm.CMPLWI(0, REG_SCRATCH, 0x8000);
-      // Branch around B if NOT in range: BO=4 (branch if CR false), BI=0 (CR0[LT])
-      m_asm.BC(4, 0, 8);  // skip over the B when EA outside [0x80000000,0x80008000)
+      m_asm.BC(4, 0, 8);  // skip over B when EA outside range
       skip_branch = m_asm.Code() + m_asm.Size();
-      m_asm.B(0);  // placeholder: b 0 (infinite loop to self, patched below)
+      m_asm.B(0);  // placeholder, patched below
     }
 
     // Align EA to 32 bytes (Gekko cache line)
-    m_asm.LI32(REG_SCRATCH, 0xFFFFFFE0);  // ~31 (64-bit mask)
+    m_asm.LI32(REG_SCRATCH, 0xFFFFFFE0);
     m_asm.AND(REG_SCRATCH, REG_SCRATCH2, REG_SCRATCH);
-    // Copy to r3 (r0 can't be used as D-form base register)
-    m_asm.OR(3, REG_SCRATCH, REG_SCRATCH);
-    // Zero 32 bytes (8 × 4-byte stores)
-    m_asm.ADDI(REG_SCRATCH2, 0, 0);
-    for (int off = 0; off < 32; off += 4)
-      m_asm.STW(REG_SCRATCH2, 3, off);
+    m_asm.OR(3, REG_SCRATCH, REG_SCRATCH);   // r3 = aligned EA (base for zeroing)
 
-    // Patch the B placeholder to jump past the zeroing code
+    // Zero 32 bytes via AltiVec (VXOR + 2× STVX)
+    m_asm.VXOR(0, 0, 0);     // v0 = 0
+    m_asm.STVX(0, 3, 0);     // mem[r3..r3+15] = 0
+    m_asm.STVX(0, 3, 16);    // mem[r3+16..r3+31] = 0
+
     if (m_low_dcbz_hack)
     {
       u32* insn = reinterpret_cast<u32*>(const_cast<u8*>(skip_branch));

@@ -383,7 +383,7 @@ bool JitPPC64::CompileTable31_Integer(UGeckoInstruction inst)
       m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 30, 30, 30);
       m_asm.OR(REG_SCRATCH, REG_SCRATCH, REG_SCRATCH2);
       // u32 bit 31 (CR0_LT) stays 0
-      m_asm.MTCRF(0x80, REG_SCRATCH);
+      m_asm.MTCRF(0x01, REG_SCRATCH);
       // CR0 now matches ppcState
       m_cr0_native_valid = true;
       // mcrxr clears SO, OV, CA in XER

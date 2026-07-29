@@ -1002,14 +1002,14 @@ void JitPPC64::WriteBLRExit()
   // Patch both branches to the slow path:
   //   beq_empty_pos — taken when counter == 0 (stack empty)
   //   bne_pos       — taken when popped guest_val ≠ LR (mispredict)
-  const auto patch_branch = [&](const u8* pos, u32 bo_bi) {
+  const auto patch_branch = [&](const u8* pos, u32 bo, u32 bi) {
     s32 bd = static_cast<s32>(slow_path_start - pos);
-    u32 enc = (16u << 26) | ((bo_bi & 0x1F) << 21) | ((pos[2] & 0x3E) << 15) |
+    u32 enc = (16u << 26) | ((bo & 0x1F) << 21) | ((bi & 0x1F) << 16) |
               (((bd >> 2) & 0x3FFF) << 2);
     std::memcpy(const_cast<u8*>(pos), &enc, sizeof(enc));
   };
-  patch_branch(beq_empty_pos, (12u << 5) | 2u);  // BEQ: BO=12, BI=2
-  patch_branch(bne_pos, (4u << 5) | 2u);          // BNE: BO=4, BI=2
+  patch_branch(beq_empty_pos, 12, 2);  // BEQ: BO=12, BI=2
+  patch_branch(bne_pos, 4, 2);          // BNE: BO=4, BI=2
 }
 
 // ===========================================================================

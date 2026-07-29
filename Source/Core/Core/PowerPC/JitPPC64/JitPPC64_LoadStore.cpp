@@ -793,7 +793,7 @@ bool JitPPC64::CompileTable31_LoadStore(UGeckoInstruction inst)
       m_asm.LBZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(XER_SO_OV_OFFSET));
       m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 27, 2, 3);  // SO → u32 bit 28
       m_asm.ORIS(REG_SCRATCH, REG_SCRATCH, 0x2000);       // set u32 bit 29 = EQ=1
-      m_asm.MTCRF(0x80, REG_SCRATCH);                      // update CR field 0 only
+      m_asm.MTCRF(0x01, REG_SCRATCH);                      // update CR field 0 only
       m_asm.ADDI(REG_SCRATCH, 0, 0);
       m_asm.STB(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(RESERVE_OFFSET));
     }
