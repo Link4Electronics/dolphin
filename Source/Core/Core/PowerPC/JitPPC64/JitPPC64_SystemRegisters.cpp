@@ -374,6 +374,9 @@ bool JitPPC64::CompileRFI(UGeckoInstruction inst)
 
 bool JitPPC64::CompileTable31_SystemReg(UGeckoInstruction inst)
 {
+  if (bJITSystemRegistersOff)
+    return false;
+
   u32 xo = inst.SUBOP10;
 
   switch (xo)

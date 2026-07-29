@@ -1449,6 +1449,8 @@ void JitPPC64::Jit(u32 em_address)
 
 void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
 {
+  RefreshConfig();
+
   if (SConfig::GetInstance().bJITNoBlockCache)
     ClearCache();
 
@@ -1586,9 +1588,16 @@ void JitPPC64::Run()
 
     while (m_ppc_state.downcount > 0 && cpu.GetState() == CPU::State::Running)
     {
+      if (bJITOff)
+      {
+        m_system.GetInterpreter().SingleStep();
+        m_ppc_state.downcount -= 1;
+        continue;
+      }
+
       // Try to find or compile a block for the current PC
       if (!m_block_cache.GetBlockFromStartAddress(m_ppc_state.pc,
-                                                    m_ppc_state.feature_flags))
+                                                     m_ppc_state.feature_flags))
       {
         if (m_failed_pcs.count(m_ppc_state.pc) == 0)
         {
