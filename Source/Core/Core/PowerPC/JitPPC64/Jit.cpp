@@ -1463,7 +1463,7 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
   // Per-instruction fallback: unhandled opcodes call FallBackToInterpreter
   // (no block-level reject gate).
 
-  size_t estimated_size = code_block.m_num_instructions * 64;
+  size_t estimated_size = code_block.m_num_instructions * 128;
   if (m_code_pos + estimated_size > m_code_end)
   {
     if (clear_cache_and_retry_on_failure)

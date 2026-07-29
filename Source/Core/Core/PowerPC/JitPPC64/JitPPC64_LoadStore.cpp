@@ -433,16 +433,18 @@ bool JitPPC64::CompileLoadStore(UGeckoInstruction inst)
       m_asm.MR(gpr.W(ra), REG_SCRATCH2);
     }
     return true;
-  case 42: // lha (signed, need LHA not LHZ)
+  case 42: // lha (signed halfword)
     {
       u32 host_rd = gpr.W(rd);
-      m_asm.LHA(host_rd, REG_SCRATCH2, 0);
+      EmitBackpatchRoutine(16, opcd, rd, 0, host_rd, true);
+      m_asm.EXTSH(host_rd, host_rd);
     }
     return true;
   case 43: // lhau
     {
       u32 host_rd = gpr.W(rd);
-      m_asm.LHA(host_rd, REG_SCRATCH2, 0);
+      EmitBackpatchRoutine(16, opcd, rd, ra, host_rd, true);
+      m_asm.EXTSH(host_rd, host_rd);
       m_asm.MR(gpr.W(ra), REG_SCRATCH2);
     }
     return true;
@@ -483,37 +485,35 @@ bool JitPPC64::CompileLoadStore(UGeckoInstruction inst)
     return true;
 
   // FPU loads (D-form)
-  case 48: // lfs — FPU single, keep old backpatch (FPU MMIO extremely rare)
-    {
-      const u8* addr = m_asm.Code() + m_asm.Size();
-      m_asm.LFS(0, REG_SCRATCH2, 0);
-      AddBackpatchEntry(addr, m_ppc_state.pc, 0, inst.hex, rd);
-      m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
-      return true;
-    }
+  case 48: // lfs
+    EmitBackpatchRoutine(32, opcd, rd, 0, 0, true, true);
+    m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
+    return true;
   case 50: // lfd
     EmitBackpatchRoutine(64, opcd, rd, 0, 0, true, true);
     m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
     return true;
+  case 49: // lfsu
+    EmitBackpatchRoutine(32, opcd, rd, ra, 0, true, true);
+    m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
+    m_asm.MR(gpr.W(ra), REG_SCRATCH2);
+    return true;
+  case 51: // lfdu
+    EmitBackpatchRoutine(64, opcd, rd, ra, 0, true, true);
+    m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
+    m_asm.MR(gpr.W(ra), REG_SCRATCH2);
+    return true;
 
   // FPU stores (D-form)
-  case 52: // stfs — FPU single, keep old backpatch
-    {
-      const u8* addr = m_asm.Code() + m_asm.Size();
-      m_asm.LFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
-      m_asm.STFS(0, REG_SCRATCH2, 0);
-      AddBackpatchEntry(addr, m_ppc_state.pc, 0, inst.hex, rd);
-      return true;
-    }
+  case 52: // stfs
+    m_asm.LFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
+    EmitBackpatchRoutine(32, opcd, rd, 0, 0, false, true);
+    return true;
   case 53: // stfsu
-    {
-      const u8* addr = m_asm.Code() + m_asm.Size();
-      m_asm.LFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
-      m_asm.STFS(0, REG_SCRATCH2, 0);
-      AddBackpatchEntry(addr, m_ppc_state.pc, 0, inst.hex, rd);
-      m_asm.MR(gpr.W(ra), REG_SCRATCH2);
-      return true;
-    }
+    m_asm.LFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
+    EmitBackpatchRoutine(32, opcd, rd, ra, 0, false, true);
+    m_asm.MR(gpr.W(ra), REG_SCRATCH2);
+    return true;
   case 54: // stfd
     m_asm.LFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
     EmitBackpatchRoutine(64, opcd, rd, 0, 0, false, true);
@@ -521,22 +521,6 @@ bool JitPPC64::CompileLoadStore(UGeckoInstruction inst)
   case 55: // stfdu
     m_asm.LFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
     EmitBackpatchRoutine(64, opcd, rd, ra, 0, false, true);
-    m_asm.MR(gpr.W(ra), REG_SCRATCH2);
-    return true;
-
-  // FPU loads (D-form) — update forms
-  case 49: // lfsu — keep old backpatch
-    {
-      const u8* addr = m_asm.Code() + m_asm.Size();
-      m_asm.LFS(0, REG_SCRATCH2, 0);
-      AddBackpatchEntry(addr, m_ppc_state.pc, 0, inst.hex, rd);
-      m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
-      m_asm.MR(gpr.W(ra), REG_SCRATCH2);
-      return true;
-    }
-  case 51: // lfdu
-    EmitBackpatchRoutine(64, opcd, rd, ra, 0, true, true);
-    m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
     m_asm.MR(gpr.W(ra), REG_SCRATCH2);
     return true;
 
@@ -663,13 +647,15 @@ bool JitPPC64::CompileTable31_LoadStore(UGeckoInstruction inst)
   case 343:  // lhax
     {
       u32 host_rd = gpr.W(rd);
-      m_asm.LHA(host_rd, REG_SCRATCH2, 0);
+      EmitBackpatchRoutine(16, inst.hex, rd, 0, host_rd, true);
+      m_asm.EXTSH(host_rd, host_rd);
     }
     return true;
   case 375:  // lhaux
     {
       u32 host_rd = gpr.W(rd);
-      m_asm.LHA(host_rd, REG_SCRATCH2, 0);
+      EmitBackpatchRoutine(16, inst.hex, rd, ra, host_rd, true);
+      m_asm.EXTSH(host_rd, host_rd);
       m_asm.MR(gpr.W(ra), REG_SCRATCH2);
     }
     return true;
@@ -710,23 +696,15 @@ bool JitPPC64::CompileTable31_LoadStore(UGeckoInstruction inst)
     return true;
 
   // FPU indexed loads
-  case 535:  // lfsx — keep old backpatch (FPU single, rare)
-    {
-      const u8* addr = m_asm.Code() + m_asm.Size();
-      m_asm.LFS(0, REG_SCRATCH2, 0);
-      AddBackpatchEntry(addr, m_ppc_state.pc, 0, inst.hex, rd);
-      m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
-      return true;
-    }
-  case 567:  // lfsux — keep old backpatch
-    {
-      const u8* addr = m_asm.Code() + m_asm.Size();
-      m_asm.LFS(0, REG_SCRATCH2, 0);
-      AddBackpatchEntry(addr, m_ppc_state.pc, 0, inst.hex, rd);
-      m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
-      m_asm.MR(gpr.W(ra), REG_SCRATCH2);
-      return true;
-    }
+  case 535:  // lfsx
+    EmitBackpatchRoutine(32, inst.hex, rd, 0, 0, true, true);
+    m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
+    return true;
+  case 567:  // lfsux
+    EmitBackpatchRoutine(32, inst.hex, rd, ra, 0, true, true);
+    m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
+    m_asm.MR(gpr.W(ra), REG_SCRATCH2);
+    return true;
   case 599:  // lfdx
     EmitBackpatchRoutine(64, inst.hex, rd, 0, 0, true, true);
     m_asm.STFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
@@ -738,23 +716,15 @@ bool JitPPC64::CompileTable31_LoadStore(UGeckoInstruction inst)
     return true;
 
   // FPU indexed stores
-  case 663:  // stfsx — keep old backpatch
-    {
-      const u8* addr = m_asm.Code() + m_asm.Size();
-      m_asm.LFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
-      m_asm.STFS(0, REG_SCRATCH2, 0);
-      AddBackpatchEntry(addr, m_ppc_state.pc, 0, inst.hex, rd);
-      return true;
-    }
-  case 695:  // stfsux — keep old backpatch
-    {
-      const u8* addr = m_asm.Code() + m_asm.Size();
-      m_asm.LFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
-      m_asm.STFS(0, REG_SCRATCH2, 0);
-      AddBackpatchEntry(addr, m_ppc_state.pc, 0, inst.hex, rd);
-      m_asm.MR(gpr.W(ra), REG_SCRATCH2);
-      return true;
-    }
+  case 663:  // stfsx
+    m_asm.LFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
+    EmitBackpatchRoutine(32, inst.hex, rd, 0, 0, false, true);
+    return true;
+  case 695:  // stfsux
+    m_asm.LFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
+    EmitBackpatchRoutine(32, inst.hex, rd, ra, 0, false, true);
+    m_asm.MR(gpr.W(ra), REG_SCRATCH2);
+    return true;
   case 727:  // stfdx
     m_asm.LFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
     EmitBackpatchRoutine(64, inst.hex, rd, 0, 0, false, true);
@@ -769,33 +739,37 @@ bool JitPPC64::CompileTable31_LoadStore(UGeckoInstruction inst)
   case 534:  // lwbrx
     {
       u32 host_rd = gpr.W(rd);
-      const u8* addr = m_asm.Code() + m_asm.Size();
-      m_asm.LWBRX(host_rd, REG_SCRATCH2, 0);
-      AddBackpatchEntry(addr, m_ppc_state.pc, 0, inst.hex, rd);
+      EmitBackpatchRoutine(32, inst.hex, rd, 0, host_rd, true);
+      m_asm.STW(host_rd, 1, -8);
+      m_asm.ADDI(REG_SCRATCH, 0, -8);
+      m_asm.LWBRX(host_rd, 1, REG_SCRATCH);
     }
     return true;
   case 662:  // stwbrx
     {
       u32 host_rs = gpr.R(rd);
-      const u8* addr = m_asm.Code() + m_asm.Size();
-      m_asm.STWBRX(host_rs, REG_SCRATCH2, 0);
-      AddBackpatchEntry(addr, m_ppc_state.pc, 0, inst.hex, rd);
+      m_asm.STW(host_rs, 1, -8);
+      m_asm.ADDI(REG_SCRATCH, 0, -8);
+      m_asm.LWBRX(REG_SCRATCH, 1, REG_SCRATCH);
+      EmitBackpatchRoutine(32, inst.hex, rd, 0, REG_SCRATCH, false);
     }
     return true;
   case 790:  // lhbrx
     {
       u32 host_rd = gpr.W(rd);
-      const u8* addr = m_asm.Code() + m_asm.Size();
-      m_asm.LHBRX(host_rd, REG_SCRATCH2, 0);
-      AddBackpatchEntry(addr, m_ppc_state.pc, 0, inst.hex, rd);
+      EmitBackpatchRoutine(16, inst.hex, rd, 0, host_rd, true);
+      m_asm.STH(host_rd, 1, -4);
+      m_asm.ADDI(REG_SCRATCH, 0, -4);
+      m_asm.LHBRX(host_rd, 1, REG_SCRATCH);
     }
     return true;
   case 918:  // sthbrx
     {
       u32 host_rs = gpr.R(rd);
-      const u8* addr = m_asm.Code() + m_asm.Size();
-      m_asm.STHBRX(host_rs, REG_SCRATCH2, 0);
-      AddBackpatchEntry(addr, m_ppc_state.pc, 0, inst.hex, rd);
+      m_asm.STH(host_rs, 1, -4);
+      m_asm.ADDI(REG_SCRATCH, 0, -4);
+      m_asm.LHBRX(REG_SCRATCH, 1, REG_SCRATCH);
+      EmitBackpatchRoutine(16, inst.hex, rd, 0, REG_SCRATCH, false);
     }
     return true;
 
@@ -830,6 +804,9 @@ bool JitPPC64::CompileTable31_LoadStore(UGeckoInstruction inst)
     {
       const u8* addr = m_asm.Code() + m_asm.Size();
       m_asm.LFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
+      m_asm.STD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);
+      m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 2, 31);
+      m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE);
       m_asm.STFIWX(0, REG_SCRATCH2, 0);
       AddBackpatchEntry(addr, m_ppc_state.pc, 0, inst.hex, rd);
       return true;
@@ -866,12 +843,17 @@ bool JitPPC64::CompileLMW(UGeckoInstruction inst)
   u32 ra = inst.RA;
   s32 d = static_cast<s32>(static_cast<s16>(inst.SIMM_16));
 
+  // Compute guest EA into REG_SCRATCH2, then translate to host address
   if (ra == 0)
     m_asm.ADDI(REG_SCRATCH2, 0, d);
   else if (m_constant_propagation.HasGPR(ra))
     m_asm.LI32(REG_SCRATCH2, m_constant_propagation.GetGPR(ra) + d);
   else
     m_asm.ADDI(REG_SCRATCH2, gpr.R(ra), d);
+
+  m_asm.STD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);
+  m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 2, 31);
+  m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE);
 
   for (u32 r = rt; r <= 31; ++r)
   {
@@ -888,12 +870,17 @@ bool JitPPC64::CompileSTMW(UGeckoInstruction inst)
   u32 ra = inst.RA;
   s32 d = static_cast<s32>(static_cast<s16>(inst.SIMM_16));
 
+  // Compute guest EA into REG_SCRATCH2, then translate to host address
   if (ra == 0)
     m_asm.ADDI(REG_SCRATCH2, 0, d);
   else if (m_constant_propagation.HasGPR(ra))
     m_asm.LI32(REG_SCRATCH2, m_constant_propagation.GetGPR(ra) + d);
   else
     m_asm.ADDI(REG_SCRATCH2, gpr.R(ra), d);
+
+  m_asm.STD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);
+  m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 2, 31);
+  m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE);
 
   for (u32 r = rs; r <= 31; ++r)
   {

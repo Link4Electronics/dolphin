@@ -19,8 +19,10 @@ public:
   void Write32(u32 insn)
   {
     if (m_pos + 4 <= m_capacity)
+    {
       std::memcpy(m_code + m_pos, &insn, 4);
-    m_pos += 4;
+      m_pos += 4;
+    }
   }
 
   // -- Arithmetic (opcd=31, various XO) --

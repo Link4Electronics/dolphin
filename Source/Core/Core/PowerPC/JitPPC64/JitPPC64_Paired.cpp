@@ -411,6 +411,12 @@ bool JitPPC64::CompilePairedLoadStore(UGeckoInstruction inst)
       m_asm.ADDI(REG_SCRATCH2, gpr.R(inst.RA), simm);
   }
 
+  // Save guest EA for update-form RA write-back, then translate to physical address
+  if (update)
+    m_asm.STD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);
+  m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 2, 31);
+  m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE);
+
   if (type == QUANTIZE_FLOAT)
   {
     // ---- QUANTIZE_FLOAT path (AltiVec / inline FPR) ----
@@ -526,10 +532,10 @@ bool JitPPC64::CompilePairedLoadStore(UGeckoInstruction inst)
     }
   }
 
-  // ---- Update form: GPR[RA] = EA ----
+  // ---- Update form: GPR[RA] = EA (reload from stack, REG_SCRATCH2 is now physical addr) ----
   if (update)
   {
-    m_asm.MR(gpr.W(inst.RA), REG_SCRATCH2);
+    m_asm.LD(gpr.W(inst.RA), 1, EA_SAVE_OFFSET);
   }
 
   return true;
