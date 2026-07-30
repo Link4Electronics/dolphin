@@ -580,6 +580,15 @@ void JitPPC64::EmitProlog()
   // so we must save Run()'s TOC here and restore it before returning.
   m_asm.LD(REG_SCRATCH, 1, 16);                  // r0 = dispatcher LR save = Run_LR
   m_asm.LD(REG_SCRATCH2, 1, 8);                  // r11 = dispatcher r2 save = Jit.cpp TOC
+  // Probe the target page BEFORE the STDU — write 0 to the exact address
+  // that STDU will use, forcing the kernel to commit that page.  Without
+  // this, stdu r1,-FRAME_SIZE(r1) may cross a 64 KB page boundary onto
+  // an uncommitted page, causing SIGSEGV on 64 KB page systems (PPC64).
+  // Use r10 for the probe value — r0 holds LR and r11 holds TOC.
+  // The exit path restores r10 from the dispatcher frame, not the block's
+  // save slot, so clobbering r10 here is safe.
+  m_asm.LI(10, 0);
+  m_asm.STD(10, 1, -static_cast<s32>(FRAME_SIZE));
   m_asm.STDU(1, 1, -static_cast<s32>(FRAME_SIZE));
   m_asm.STD(REG_SCRATCH, 1, 16);                 // save Run_LR at block_SP+16
   m_asm.STD(REG_SCRATCH2, 1, static_cast<s32>(R2_SAVE_OFFSET));  // save TOC at block_SP+8
