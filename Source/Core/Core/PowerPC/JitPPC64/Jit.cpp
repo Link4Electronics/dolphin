@@ -1720,6 +1720,18 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
 void JitPPC64::Run()
 {
   ProtectStack();
+
+  // Stack probe: write to pages below SP to force the kernel to commit them.
+  // The JIT prolog does stdu r1,-FRAME_SIZE(r1) which may cross a 64 KB page
+  // boundary.  Without this probe, the write to an uncommitted page SIGSEGVs.
+  {
+    volatile u8 canary = 0;
+    const uintptr_t sp = reinterpret_cast<uintptr_t>(&canary);
+    for (size_t offset = 0; offset < 256 * 1024; offset += 64 * 1024)
+      *reinterpret_cast<volatile u8*>(sp - offset) = 0;
+    (void)canary;
+  }
+
   auto& core_timing = m_system.GetCoreTiming();
   auto& cpu = m_system.GetCPU();
 
