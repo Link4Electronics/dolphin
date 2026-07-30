@@ -367,6 +367,8 @@ static void StoreIntFromFPR(PPC64Assembler& asm_, u32 src_fpr, u32 ea_reg, u32 o
 
 bool JitPPC64::CompilePairedLoadStore(UGeckoInstruction inst)
 {
+  if (!jo.fastmem)
+    return false;
   u32 opcd = inst.OPCD;
   bool indexed = (opcd == 4);
   bool is_load = (opcd == 56 || opcd == 57 ||
@@ -411,10 +413,10 @@ bool JitPPC64::CompilePairedLoadStore(UGeckoInstruction inst)
       m_asm.ADDI(REG_SCRATCH2, gpr.R(inst.RA), simm);
   }
 
-  // Save guest EA for update-form RA write-back, then translate to physical address
+  // Save guest EA for update-form RA write-back, then translate to host address
   if (update)
     m_asm.STD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);
-  m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 2, 31);
+  m_asm.RLDICL(REG_SCRATCH2, REG_SCRATCH2, 0, 32);
   m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE);
 
   if (type == QUANTIZE_FLOAT)

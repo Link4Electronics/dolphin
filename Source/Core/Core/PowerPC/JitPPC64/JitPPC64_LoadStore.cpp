@@ -816,10 +816,12 @@ bool JitPPC64::CompileTable31_LoadStore(UGeckoInstruction inst)
   // stfiwx — store FPR as integer word
   case 983:  // stfiwx
     {
+      if (!jo.fastmem)
+        return false;
       const u8* addr = m_asm.Code() + m_asm.Size();
       m_asm.LFD(0, REG_PPC_BASE, static_cast<s32>(PS_OFFSET_FR(rd, 0)));
       m_asm.STD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);
-      m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 2, 31);
+      m_asm.RLDICL(REG_SCRATCH2, REG_SCRATCH2, 0, 32);
       m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE);
       m_asm.STFIWX(0, REG_SCRATCH2, 0);
       AddBackpatchEntry(addr, m_ppc_state.pc, 0, inst.hex, rd);
@@ -853,6 +855,8 @@ bool JitPPC64::CompileTable31_LoadStore(UGeckoInstruction inst)
 
 bool JitPPC64::CompileLMW(UGeckoInstruction inst)
 {
+  if (!jo.fastmem)
+    return false;
   u32 rt = inst.RD;
   u32 ra = inst.RA;
   s32 d = static_cast<s32>(static_cast<s16>(inst.SIMM_16));
@@ -866,7 +870,7 @@ bool JitPPC64::CompileLMW(UGeckoInstruction inst)
     m_asm.ADDI(REG_SCRATCH2, gpr.R(ra), d);
 
   m_asm.STD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);
-  m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 2, 31);
+  m_asm.RLDICL(REG_SCRATCH2, REG_SCRATCH2, 0, 32);
   m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE);
 
   for (u32 r = rt; r <= 31; ++r)
@@ -880,6 +884,8 @@ bool JitPPC64::CompileLMW(UGeckoInstruction inst)
 
 bool JitPPC64::CompileSTMW(UGeckoInstruction inst)
 {
+  if (!jo.fastmem)
+    return false;
   u32 rs = inst.RS;
   u32 ra = inst.RA;
   s32 d = static_cast<s32>(static_cast<s16>(inst.SIMM_16));
@@ -893,7 +899,7 @@ bool JitPPC64::CompileSTMW(UGeckoInstruction inst)
     m_asm.ADDI(REG_SCRATCH2, gpr.R(ra), d);
 
   m_asm.STD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);
-  m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 2, 31);
+  m_asm.RLDICL(REG_SCRATCH2, REG_SCRATCH2, 0, 32);
   m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE);
 
   for (u32 r = rs; r <= 31; ++r)

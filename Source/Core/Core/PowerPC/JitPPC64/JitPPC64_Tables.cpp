@@ -90,19 +90,28 @@ void JitPPC64::CompileInstruction(PPCAnalyst::CodeOp& op)
 
   case 46:
     if (bJITLoadStoreOff) { FallBackToInterpreter(inst); break; }
-    CompileLMW(inst); break;
+    if (!CompileLMW(inst))
+      FallBackToInterpreter(inst);
+    break;
   case 47:
     if (bJITLoadStoreOff) { FallBackToInterpreter(inst); break; }
-    CompileSTMW(inst); break;
+    if (!CompileSTMW(inst))
+      FallBackToInterpreter(inst);
+    break;
 
   case 4:
   {
     if (bJITPairedOff) { FallBackToInterpreter(inst); break; }
     u32 subop6 = inst.SUBOP6;
     if (subop6 == 6 || subop6 == 7 || subop6 == 38 || subop6 == 39)
-      CompilePairedLoadStore(inst);
+    {
+      if (!CompilePairedLoadStore(inst))
+        FallBackToInterpreter(inst);
+    }
     else
+    {
       CompilePairedSingle(inst);
+    }
     break;
   }
   case 16:
@@ -131,7 +140,9 @@ void JitPPC64::CompileInstruction(PPCAnalyst::CodeOp& op)
   case 56: case 57:
   case 60: case 61:
     if (bJITPairedOff) { FallBackToInterpreter(inst); break; }
-    CompilePairedLoadStore(inst); break;
+    if (!CompilePairedLoadStore(inst))
+      FallBackToInterpreter(inst);
+    break;
 
   case 59:
     if (bJITFloatingPointOff) { FallBackToInterpreter(inst); break; }

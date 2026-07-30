@@ -32,6 +32,12 @@ extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
                                      u32 is_store, u32 access_size,
                                      u32 rd, u32 ra, u64 store_value);
 
+// Real TLS pointer captured at JIT init.
+// On ELFv2 PPC64, r13 = thread pointer (TLS).  JIT code overwrites r13
+// with mem_ptr.  The SIGSEGV handler must restore real TLS before calling
+// any C++ code that might access thread-local storage (errno, logging, etc.).
+static u64 s_real_tls = 0;
+
 // PPCState field offsets (computed at init from actual struct layout)
 u32 PC_OFFSET = 0;
 u32 GPR_OFFSET = 0;
@@ -190,25 +196,35 @@ JitPPC64::~JitPPC64() { Shutdown(); }
 
 static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
 {
+  // On ELFv2 PPC64, r13 = TLS pointer.  JIT code overwrites r13 with
+  // mem_ptr, so when a fast-path SIGSEGV fires, r13 = mem_ptr, not TLS.
+  // Any C++ code in this handler that accesses thread-local storage
+  // (errno via logging, fmt internals, etc.) will crash.
+  //
+  // Fix: save fault r13 (= mem_ptr), swap to real TLS atomically so no
+  // C++ code runs with the wrong r13.  Restore mem_ptr to the ucontext
+  // before returning (the kernel's sigreturn will restore mem_ptr into
+  // r13 for the JIT code).
+  u64 fault_r13;
+  if (s_real_tls)
+    asm volatile("mr %0, 13\n\t"
+                 "mr 13, %1"
+                 : "=r"(fault_r13)
+                 : "r"(s_real_tls)
+                 : "13");
+  else
+    asm volatile("mr %0, 13" : "=r"(fault_r13));
+
   auto* uc = static_cast<ucontext_t*>(ucontext_arg);
   auto* ctx = &uc->uc_mcontext;
-
-  // (fault_instr extracted here for debugging, currently unused)
-  // u32 fault_instr = 0;
-  // if (ctx->CTX_NIP)
-  //   fault_instr = *reinterpret_cast<const u32*>(ctx->CTX_NIP);
 
   uintptr_t access_addr = reinterpret_cast<uintptr_t>(info->si_addr);
 
   if (g_jit_ppc64_instance && g_jit_ppc64_instance->HandleFault(access_addr, ctx))
-  {
-    // JITPROBE disabled
-    return;
-  }
+    goto done;
 
   if (g_jit_ppc64_instance)
   {
-    // Dump code around the faulting instruction
     if (ctx->CTX_NIP)
       g_jit_ppc64_instance->DumpCode(reinterpret_cast<const u8*>(ctx->CTX_NIP) - 16, 48);
     fprintf(stderr, "JIT: g_last_block_entry = %p (intended jump target)\n",
@@ -216,16 +232,31 @@ static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
     g_jit_ppc64_instance->DoBacktrace();
   }
 
-  // Not a JIT MMIO fault — restore default handler and re-raise so the
-  // process crashes with a proper core dump / debugger notification.
-  struct sigaction sa_default = {};
-  sa_default.sa_handler = SIG_DFL;
-  sigaction(SIGSEGV, &sa_default, nullptr);
+  // Not a JIT MMIO fault — restore default handler and re-raise.
+  {
+    struct sigaction sa_default = {};
+    sa_default.sa_handler = SIG_DFL;
+    sigaction(SIGSEGV, &sa_default, nullptr);
+  }
   raise(SIGSEGV);
+
+done:
+  // Restore mem_ptr to the ucontext so the kernel's sigreturn sets
+  // r13 = mem_ptr when control returns to the JIT code.
+  if (s_real_tls)
+    ctx->regs->gpr[13] = fault_r13;
 }
 
 void JitPPC64::Init()
 {
+  // Capture the real TLS pointer BEFORE any JIT code overwrites r13.
+  // On ELFv2 PPC64, r13 = thread pointer.  The SIGSEGV handler needs
+  // this to restore TLS before calling C++ code.
+  asm volatile("mr %0, 13" : "=r"(s_real_tls));
+
+  // Initialize the fastmem arena FIRST (so RefreshConfig can evaluate
+  // jo.fastmem based on the real arena state), then read all config.
+  InitFastmemArena();
   RefreshConfig();
   InitOffsets(m_ppc_state);
 
@@ -251,7 +282,6 @@ void JitPPC64::Init()
   code_block.m_stats = &js.st;
   code_block.m_gpa = &js.gpa;
   code_block.m_fpa = &js.fpa;
-  jo.fastmem_arena = false;
   jo.optimizeGatherPipe = false;
 
   // Enable block linking (can be disabled via config)
@@ -1357,54 +1387,70 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
   // 1. Record fast path position
   const u8* fast_start = m_asm.Code() + m_asm.Size();
 
-  // Save original guest EA (r11) to block frame for slow path recovery,
-  // then translate EA to physical address:
-  //   host_addr = REG_PHYS_BASE + (EA & 0x3FFFFFFF)
-  m_asm.STD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);           // save original EA
-  m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 2, 31);   // r11 = EA & 0x3FFFFFFF
-  m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE); // r11 = host address
+  // Save original guest EA (r11) to block frame for slow path recovery
+  m_asm.STD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);
 
-  // Emit the fast path access instruction
-  if (is_fpr)
+  if (jo.fastmem)
   {
-    if (is_load)
+    // Fast path: translate EA to host address via fastmem arena.
+    // EA is the full 32-bit guest address (zero-extend to 64 bits).
+    // host_addr = REG_PHYS_BASE + zext32(EA)
+    // On PPC64, RLDICL with mb=32 clears the upper 32 bits, producing
+    // a zero-extended 32-bit value (equivalent to JIT64's ADD(32,...)).
+    m_asm.RLDICL(REG_SCRATCH2, REG_SCRATCH2, 0, 32);
+    m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE);
+
+    if (is_fpr)
     {
-      if (access_size == 32)
-        m_asm.LFS(0, REG_SCRATCH2, 0);
+      if (is_load)
+      {
+        if (access_size == 32)
+          m_asm.LFS(0, REG_SCRATCH2, 0);
+        else
+          m_asm.LFD(0, REG_SCRATCH2, 0);
+      }
       else
-        m_asm.LFD(0, REG_SCRATCH2, 0);
+      {
+        if (access_size == 32)
+          m_asm.STFS(0, REG_SCRATCH2, 0);
+        else
+          m_asm.STFD(0, REG_SCRATCH2, 0);
+      }
     }
     else
     {
-      if (access_size == 32)
-        m_asm.STFS(0, REG_SCRATCH2, 0);
-      else
-        m_asm.STFD(0, REG_SCRATCH2, 0);
+      switch (access_size)
+      {
+      case 8:
+        if (is_load)  m_asm.LBZ(data_reg, REG_SCRATCH2, 0);
+        else          m_asm.STB(data_reg, REG_SCRATCH2, 0);
+        break;
+      case 16:
+        if (is_load)  m_asm.LHZ(data_reg, REG_SCRATCH2, 0);
+        else          m_asm.STH(data_reg, REG_SCRATCH2, 0);
+        break;
+      case 32:
+        if (is_load)  m_asm.LWZ(data_reg, REG_SCRATCH2, 0);
+        else          m_asm.STW(data_reg, REG_SCRATCH2, 0);
+        break;
+      default:
+        return;
+      }
     }
   }
   else
   {
-    switch (access_size)
-    {
-    case 8:
-      if (is_load)  m_asm.LBZ(data_reg, REG_SCRATCH2, 0);
-      else          m_asm.STB(data_reg, REG_SCRATCH2, 0);
-      break;
-    case 16:
-      if (is_load)  m_asm.LHZ(data_reg, REG_SCRATCH2, 0);
-      else          m_asm.STH(data_reg, REG_SCRATCH2, 0);
-      break;
-    case 32:
-      if (is_load)  m_asm.LWZ(data_reg, REG_SCRATCH2, 0);
-      else          m_asm.STW(data_reg, REG_SCRATCH2, 0);
-      break;
-    default:
-      return;
-    }
+    // No fastmem arena — REG_PHYS_BASE points to the page table array,
+    // not to emulated RAM.  Emit a placeholder branch (NOP) that will
+    // be patched to branch to the trampoline slow path below.
+    m_asm.NOP();
   }
-  // For update-form instructions (ra != 0), restore the original guest EA
-  // to REG_SCRATCH2 so that the caller's MR(gpr.W(ra), REG_SCRATCH2) copies
-  // the correct EA (not the host-translated address from the fast path).
+
+  // Restore the original guest EA to REG_SCRATCH2 for update-form
+  // instructions (ra != 0), so the caller's MR(gpr.W(ra), REG_SCRATCH2)
+  // copies the correct EA.  This is needed by both the fast path (where
+  // REG_SCRATCH2 holds the translated host address) and the slow path
+  // (where the trampoline clobbers REG_SCRATCH2 with the return address).
   if (ra != 0)
     m_asm.LD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);
   const u8* fast_end = m_asm.Code() + m_asm.Size();
@@ -1414,8 +1460,6 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
   m_tramp_asm.SetBase(m_tramp_pos, static_cast<size_t>(m_tramp_end - m_tramp_pos));
 
   // Save volatile registers (r0, r3-r10) + LR
-  // NOTE: r0 (REG_SCRATCH) may hold the store value for stores.
-  // We must save it before MFLR clobbers it.
   m_tramp_asm.STD(REG_SCRATCH, 1, 8);  // save store value (r0) at block frame + 8
   m_tramp_asm.MFLR(0);
   m_tramp_asm.STDU(REG_SCRATCH, 1, -128);
@@ -1433,7 +1477,6 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
   // Arguments to TrampolineDispatcher:
   //   r3 = ppcState* (from r12)
   //   r4 = EA         (from saved slot in block frame: block_SP + EA_SAVE_OFFSET)
-  //                    block_SP = trampoline_SP + 128 (after STDU -128 below)
   //   r5 = is_store   (0=load, 1=store)
   //   r6 = access_size (8/16/32)
   //   r7 = PPC register rd
@@ -1446,12 +1489,11 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
   m_tramp_asm.LI(7, static_cast<s32>(rd));
   m_tramp_asm.LI(8, static_cast<s32>(ra));
 
-  // For stores: pass the actual value in r9 (avoids reading stale ppcState)
+  // For stores: pass the actual value in r9
   if (!is_load)
   {
     if (is_fpr)
     {
-      // FPU store: save f0 to stack and load into r9 as u64
       m_tramp_asm.STFD(0, 1, -8);
       m_tramp_asm.LD(9, 1, -8);
     }
@@ -1461,22 +1503,16 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
     }
   }
 
-  // Save REG_PPC_BASE (r12) before the call — TrampolineDispatcher clobbers
-  // it, but we need ppcState after the register restore to reload loaded
-  // values for both integer (gpr[rd]) and FPU (ps[rd]) loads.
   m_tramp_asm.STD(REG_PPC_BASE, 1, 48);
 
   // Restore TLS before calling C++ — ELFv2 uses r13 as thread pointer.
-  // Block frame is at trampoline_SP+128 (trampoline frame is 128 bytes).
   m_tramp_asm.LD(REG_PHYS_BASE, 1, 128 + TLS_SAVE_OFFSET);
 
-  // Call TrampolineDispatcher via absolute address
   TrampMOVI64(m_tramp_asm, 12,
               reinterpret_cast<u64>(&TrampolineDispatcher));
   m_tramp_asm.MTCTR(12);
   m_tramp_asm.BCTRL();
 
-  // Restore registers
   m_tramp_asm.LD(10, 1, 56);
   m_tramp_asm.LD(9, 1, 64);
   m_tramp_asm.LD(8, 1, 72);
@@ -1488,28 +1524,12 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
   m_tramp_asm.LD(0, 1, 120);
   m_tramp_asm.MTLR(0);
 
-  // Tear down trampoline frame first — after this, r1 points to the
-  // block's stack frame and we can load r12 from the prolog's saved copy.
   m_tramp_asm.ADDI(REG_SCRATCH, 1, 128);
   m_tramp_asm.MR(1, REG_SCRATCH);
 
-  // Reload REG_PPC_BASE from the block prolog's save at [SP+24].
-  // This is the authoritative source — the trampoline's own save at
-  // [old_SP + 48] is NOT used because signal delivery or re-entrant
-  // fault handling may have clobbered it.
   m_tramp_asm.LD(REG_PPC_BASE, 1, 24);
-
-  // Reload REG_PHYS_BASE (r13 = mem_ptr) — we restored TLS before the call
-  // (see TLS_SAVE_OFFSET load above), the C++ function preserved r13 (= TLS),
-  // and now we need mem_ptr back for fast-path memory access.
-  // Load from the block prolog's save at [SP + PHYS_BASE_SAVE_OFFSET].
   m_tramp_asm.LD(REG_PHYS_BASE, 1, PHYS_BASE_SAVE_OFFSET);
 
-  // Reload the result from ppcState: TrampolineDispatcher wrote
-  // state->gpr[rd] (integer) or state->ps[rd] (FPU), but the
-  // register restore above would have clobbered data_reg with the
-  // pre-fault value.  Reading from ppcState after the restore
-  // correctly recovers the loaded value.
   if (is_load)
   {
     if (is_fpr)
@@ -1519,33 +1539,40 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
     }
     else
     {
-      // Integer load: reload from ppcState into data_reg.
-      // TrampolineDispatcher wrote the loaded value to state->gpr[rd];
-      // we reload to survive the trampoline's register save/restore.
       m_tramp_asm.LWZ(data_reg, REG_PPC_BASE,
                        static_cast<s32>(GPR_OFFSET + rd * 4));
     }
   }
 
-  // Branch back to the instruction after the fast path.
-  // Use r11 (REG_SCRATCH2) for the target address — r0 (REG_SCRATCH)
-  // holds the loaded value for integer loads and must survive.
   TrampMOVI64(m_tramp_asm, REG_SCRATCH2,
               reinterpret_cast<u64>(fast_end));
   m_tramp_asm.MTCTR(REG_SCRATCH2);
   m_tramp_asm.BCTR();
 
-  // 3. Record the mapping
   u32 tramp_size = static_cast<u32>(m_tramp_asm.Size());
   m_tramp_pos += tramp_size;
 
-  FastmemArea area;
-  area.fast_access_code = fast_start;
-  area.slow_access_code = slow_entry;
-  area.is_load = is_load;
-  area.rd = rd;
-  area.ra = ra;
-  m_fault_to_handler[fast_end] = area;
+  // 3. Patch the placeholder branch (no-fastmem case) or record the
+  //    fast → slow mapping for the fault handler (fastmem case).
+  if (!jo.fastmem)
+  {
+    // Patch the NOP at fast_start + 4 to an unconditional branch to slow_entry.
+    u8* patch = const_cast<u8*>(fast_start) + 4;
+    ptrdiff_t delta = slow_entry - patch;
+    u32 li = (static_cast<u32>(delta >> 2)) & 0x00FFFFFF;
+    *(u32*)patch = (18u << 26) | (li << 2);
+    __builtin___clear_cache(patch, patch + 4);
+  }
+  else
+  {
+    FastmemArea area;
+    area.fast_access_code = fast_start;
+    area.slow_access_code = slow_entry;
+    area.is_load = is_load;
+    area.rd = rd;
+    area.ra = ra;
+    m_fault_to_handler[fast_end] = area;
+  }
 
   // Flush trampoline icache
   __builtin___clear_cache(const_cast<u8*>(slow_entry),
