@@ -997,3 +997,70 @@ m_asm.BLR();
 
 If crash persists, add r2 save/restore to `m_dispatcher_exit` — the JIT code calls `JitPPC64Dispatch` (a C++ function) via `BCTRL`, which may clobber r2. When returning to `Run()` via the exit path, `Run()` expects its own TOC. On ELFv2, the compiler may or may not reload r2 after the call depending on cross-module optimization.
 
+## Session 2026-07-29 (continued): All BCTRL TLS Sites Fixed
+
+### Root Cause
+
+ELFv2 ABI uses `r13` as the **thread pointer (TLS)** for thread-local storage access. Dolphin's JIT reassigns `r13` to `REG_PHYS_BASE` (= `mem_ptr`) for fast guest memory access. Every C++ function called from JIT code expects `r13 = TLS` — when executing with `r13 = mem_ptr`, any TLS access (errno, thread-local, etc.) computes garbage addresses → SIGSEGV.
+
+The crash signature is consistent: `or r9, r9, r13` / `ld r7, 0(r9)` with the address changing each run (ASLR confirms runtime corruption, not a code bug).
+
+### Fix Pattern
+
+Every BCTRL (C++ function call) from JIT code is wrapped with:
+
+```
+m_asm.LD(REG_PHYS_BASE, REG_SP, TLS_SAVE_OFFSET);   // restore TLS from block frame
+// ... BCTRL ...
+m_asm.LD(REG_PHYS_BASE, REG_PPC_BASE, MEM_PTR_OFFSET);  // reload mem_ptr from ppcState
+```
+
+### All 11 BCTRL Sites Fixed
+
+| # | File | Line | C++ Function | Notes |
+|---|------|------|-------------|-------|
+| 1 | Jit.cpp | 387 | `JitPPC64Dispatch` | dispatcher_entry — TLS loaded from old block frame in ResetStack path, already correct from enter_code path |
+| 2 | Jit.cpp | 441 | `JitPPC64Dispatch` | dispatcher_lite — `LD(REG_PHYS_BASE, SP, TLS_SAVE_OFFSET)` |
+| 3 | Jit.cpp | 772 | `CheckExceptionsFromJIT` | WriteExceptionExit |
+| 4 | Jit.cpp | 823 | `CheckExceptionsFromJIT` | WriteExceptionExitReg |
+| 5 | Jit.cpp | 1449 | `TrampolineDispatcher` | Backpatch trampoline |
+| 6 | Jit.cpp | 1811 | `Interpreter::Instruction` | Interpreter fallback (already had mem_ptr reload after call, just needed TLS restore before) |
+| 7 | SystemReg.cpp | 241 | `InvalidateICacheLineFromJIT` | Cache line invalidation from JIT |
+| 8 | SystemReg.cpp | 407 | `CallMSRUpdated` | MSR change callback |
+| 9 | LoadStore.cpp | 124 | `CallLambdaTrampoline` read | Complex MMIO read lambda |
+| 10 | LoadStore.cpp | 241 | `CallLambdaTrampoline` write | Complex MMIO write lambda |
+| 11 | FPU.cpp | 262 | `CallMcrfs` | FPSCR CR field move |
+
+### Files Modified
+
+- **`Jit.cpp`**: Added TLS restore in WriteExceptionExit (line 765), WriteExceptionExitReg (line 816), interpreter fallback (line 1798), ResetStack → dispatcher_entry path (line 1066).
+- **`AGENTS.md`**: Added this session summary.
+
+## Session 2026-07-29: Remaining 3 BCTRL + ResetStack TLS Fixes + CompileMFTB Timebase
+
+### BCTRL Fixes Completed
+- **`WriteExceptionExit`** (`Jit.cpp:765`): Added `LD(REG_PHYS_BASE, SP, TLS_SAVE_OFFSET)` before `CheckExceptionsFromJIT` call, and `LD(REG_PHYS_BASE, REG_PPC_BASE, MEM_PTR_OFFSET)` after.
+- **`WriteExceptionExitReg`** (`Jit.cpp:816`): Same fix.
+- **`Interpreter fallback`** (`Jit.cpp:1798`): Added `LD(REG_PHYS_BASE, SP, TLS_SAVE_OFFSET)` before interpreter call (mem_ptr reload already existed after).
+- **`ResetStack → dispatcher_entry`** (`Jit.cpp:1066`): Added `LD(REG_PHYS_BASE, SP, -FRAME_SIZE + TLS_SAVE_OFFSET)` to load TLS from the old (still-intact) block frame before the `BRel(m_dispatcher_entry)`.
+
+### CompileMFTB Timebase Fix
+
+**Symptom:** IPL boot hangs after writing `PI_RESET_CODE: 00000001`. Log shows 2 blocks compiled (0x81200150, 0x812001FC) and executed, then silence. No SIGSEGV — the TLS fix works. The hang is a tight waiting loop within a single JIT block.
+
+**Root cause:** `CompileMFTB` emitted `LI(rd, 0)` — returning 0 for every `mftb` read. An `msleep()`-style waiting loop:
+```
+start = mftb()
+loop:
+    if mftb() - start >= delay: break
+    goto loop
+```
+always sees `elapsed = 0 - 0 = 0`, which is never ≥ delay, so the loop runs forever.
+
+**Fix:** (`JitPPC64_SystemRegisters.cpp:167-210`) — `CompileMFTB` now:
+1. Reads `spr[SPR_TL]` or `spr[SPR_TU]` from the cached SPR array in ppcState (these are updated by `JitPPC64Dispatch` → `GetFakeTimeBase()` before each block dispatch).
+2. For TBL reads: also increments the cached value by 1 tick per read, and handles TL→TU carry on overflow.
+3. Returns the **old** TL value (before increment) so callers reading TL then TU see consistent arithmetic.
+
+This makes tight timing loops within a block see time advance by 1 tick per `mftb` call, ensuring they eventually exit. At block boundaries, the timebase is refreshed to the real emulated value from CoreTiming.
+

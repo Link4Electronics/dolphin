@@ -95,7 +95,10 @@ public:
   // Complex (lambda): save r10, r13, CR, r12; call CallLambdaTrampoline; restore
   void VisitComplex(const std::function<T(Core::System&, u32)>* lambda) override
   {
-    // Save r10 and r13 (clobbered by ELFv2 C++ ABI) BEFORE sub-frame
+    // Load real TLS from block frame before saving r13 — ELFv2 uses r13 as
+    // thread pointer; we need TLS for any C++ call that might access TLS.
+    m_asm->LD(JitPPC64::REG_PHYS_BASE, 1, JitPPC64::TLS_SAVE_OFFSET);
+    // Save r10 and r13 (now = TLS) BEFORE sub-frame
     m_asm->STD(10, 1, -32);
     m_asm->STD(JitPPC64::REG_PHYS_BASE, 1, -24);
     // Save CR (via r0) and r12 to sub-frame
@@ -126,10 +129,14 @@ public:
     // Restore r12 first (r0 must be free for checkpoint), then CR, r13, r10
     m_asm->LD(JitPPC64::REG_PPC_BASE, 1, 40); // r12 saved at old SP-8 = frame SP+40
     m_asm->LD(JitPPC64::REG_SCRATCH, 1, 32);  // CR saved at old SP-16 = frame SP+32
-    m_asm->LD(JitPPC64::REG_PHYS_BASE, 1, 24); // r13 saved at old SP-24 = frame SP+24
+    m_asm->LD(JitPPC64::REG_PHYS_BASE, 1, 24); // r13 restored TLS from sub-frame save
     m_asm->LD(10, 1, 16);                      // r10 saved at old SP-32 = frame SP+16
     m_asm->ADDI(1, 1, 48);                     // tear down sub-frame
     m_asm->MTCRF(0xFF, JitPPC64::REG_SCRATCH); // restore all CR fields
+
+    // Reload mem_ptr from block frame — TLS was restored before call but now
+    // we need the physical memory base for fast-path access.
+    m_asm->LD(JitPPC64::REG_PHYS_BASE, 1, JitPPC64::PHYS_BASE_SAVE_OFFSET);
 
     // Reload LR from block prolog's save at SP+16
     m_asm->LD(JitPPC64::REG_SCRATCH, 1, 16);
@@ -203,7 +210,10 @@ public:
   // Complex (lambda): save r10, r13, CR, r12; call CallLambdaTrampoline; restore
   void VisitComplex(const std::function<void(Core::System&, u32, T)>* lambda) override
   {
-    // Save r10 and r13 (clobbered by ELFv2 C++ ABI) BEFORE sub-frame
+    // Load real TLS from block frame before saving r13 — ELFv2 uses r13 as
+    // thread pointer; we need TLS for any C++ call that might access TLS.
+    m_asm->LD(JitPPC64::REG_PHYS_BASE, 1, JitPPC64::TLS_SAVE_OFFSET);
+    // Save r10 and r13 (now = TLS) BEFORE sub-frame
     m_asm->STD(10, 1, -32);
     m_asm->STD(JitPPC64::REG_PHYS_BASE, 1, -24);
     // Save CR (via r0) and r12 to sub-frame
@@ -233,10 +243,14 @@ public:
     // Restore r12 first (r0 must be free for checkpoint), then CR, r13, r10
     m_asm->LD(JitPPC64::REG_PPC_BASE, 1, 40); // r12 saved at old SP-8 = frame SP+40
     m_asm->LD(JitPPC64::REG_SCRATCH, 1, 32);  // CR saved at old SP-16 = frame SP+32
-    m_asm->LD(JitPPC64::REG_PHYS_BASE, 1, 24); // r13 saved at old SP-24 = frame SP+24
+    m_asm->LD(JitPPC64::REG_PHYS_BASE, 1, 24); // r13 restored TLS from sub-frame save
     m_asm->LD(10, 1, 16);                      // r10 saved at old SP-32 = frame SP+16
     m_asm->ADDI(1, 1, 48);                     // tear down sub-frame
     m_asm->MTCRF(0xFF, JitPPC64::REG_SCRATCH); // restore all CR fields
+
+    // Reload mem_ptr from block frame — TLS was restored before call but now
+    // we need the physical memory base for fast-path access.
+    m_asm->LD(JitPPC64::REG_PHYS_BASE, 1, JitPPC64::PHYS_BASE_SAVE_OFFSET);
 
     // Reload LR from block prolog's save at SP+16
     m_asm->LD(JitPPC64::REG_SCRATCH, 1, 16);

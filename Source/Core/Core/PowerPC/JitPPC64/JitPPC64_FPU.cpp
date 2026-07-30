@@ -252,6 +252,8 @@ bool JitPPC64::CompileMcrfs(UGeckoInstruction inst)
 
   // Complex case — call C helper
   PrepareCall();
+  // Restore TLS before calling C++ — ELFv2 uses r13 as thread pointer.
+  m_asm.LD(REG_PHYS_BASE, REG_SP, TLS_SAVE_OFFSET);
   m_asm.MR(3, REG_PPC_BASE);
   m_asm.LI32(4, crfd);
   m_asm.LI32(5, inst.CRFS);
@@ -259,6 +261,9 @@ bool JitPPC64::CompileMcrfs(UGeckoInstruction inst)
   m_asm.MTCTR(12);
   m_asm.BCTRL();
   m_asm.LD(REG_PPC_BASE, REG_SP, 24);
+  // Reload mem_ptr — TLS was restored before the call, but we need mem_ptr
+  // for the block's fast-path memory access.
+  m_asm.LD(REG_PHYS_BASE, REG_PPC_BASE, static_cast<s32>(MEM_PTR_OFFSET));
 
   if (crfd == 0)
     m_cr0_native_valid = false;

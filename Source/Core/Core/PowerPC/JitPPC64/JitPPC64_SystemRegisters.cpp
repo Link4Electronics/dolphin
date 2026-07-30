@@ -174,13 +174,38 @@ bool JitPPC64::CompileMFTB(UGeckoInstruction inst)
   if (tbr != SPR_TL_W && tbr != SPR_TU_W)
     return false;
 
-  // JIT64 computes iIndex as (SPRU<<5 | SPRL), which for TBL gives 904 and for
-  // TBU gives 936.  The switch checks case SPR_TL (268) / SPR_TU (269) — neither
-  // matches, so it falls through to the default handler which reads spr[iIndex]=0.
-  // Every JIT backend (JIT64, JitArm64, and the interpreter) has the same offset
-  // mismatch, so mftb universally returns 0 in compiled code.  Matching that here
-  // avoids the IPL timing hang (where the loop checks TUB-TBL≤0x1124 — 0 passes).
-  m_asm.LI(gpr.W(rd), 0);
+  // Read from the cached SPR array (updated by JitPPC64Dispatch before each
+  // block dispatch via GetFakeTimeBase).  For TBL reads, also advance TL by 1
+  // tick so that tight waiting loops within a single block see time progress.
+  // Without this, the JIT would compile a single block containing:
+  //   loop: mftb rX; check; bgt loop
+  // and the timebase would never change (SPR never written inside the block),
+  // causing the loop to run forever.
+
+  if (tbr == SPR_TL_W)
+  {
+    // Load TL, increment, store back. Return the OLD value (before increment).
+    // The old value is correct for callers that read TL then TU and compute
+    // TU - TL — the increment happens between the two reads, so a subsequent
+    // TU read sees the same post-increment TL state, but the arithmetic still
+    // makes progress because TL increases by 1 per loop iteration.
+    m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_TL));
+    m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH, 1);
+    m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_TL));
+    // If TL wrapped to 0 after increment, increment TU too
+    m_asm.CMPLWI(0, REG_SCRATCH2, 0);
+    m_asm.BC(4, 2, 12);  // BO=4(false), BI=2(EQ): skip 3 instr if TL != 0
+    m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_TU));
+    m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, 1);
+    m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_TU));
+    // Return old TL value
+    m_asm.MR(gpr.W(rd), REG_SCRATCH);
+  }
+  else
+  {
+    // TUB: just load from cached SPR (no increment — TU advances via TL overflow)
+    m_asm.LWZ(gpr.W(rd), REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_TU));
+  }
   return true;
 }
 
@@ -231,6 +256,8 @@ bool JitPPC64::CompileMisc(UGeckoInstruction inst)
 
     // --- Invalidation needed: block exists at this cache line ---
     PrepareCall();
+    // Restore TLS before calling C++ — ELFv2 uses r13 as thread pointer.
+    m_asm.LD(REG_PHYS_BASE, REG_SP, TLS_SAVE_OFFSET);
     m_asm.LWZ(4, REG_SP, EA_SAVE_OFFSET);  // r4 = EA (second arg)
     TrampMOVI64(m_asm, 3, reinterpret_cast<u64>(&m_system.GetJitInterface()));
     TrampMOVI64(m_asm, 12,
@@ -397,11 +424,16 @@ bool JitPPC64::CompileRFI(UGeckoInstruction inst)
 
   // Call MSRUpdated() to update feature_flags and membase
   PrepareCall();
+  // Restore TLS before calling C++ — ELFv2 uses r13 as thread pointer.
+  m_asm.LD(REG_PHYS_BASE, REG_SP, TLS_SAVE_OFFSET);
   TrampMOVI64(m_asm, 3, reinterpret_cast<u64>(&m_system.GetPowerPC()));
   TrampMOVI64(m_asm, 12, reinterpret_cast<u64>(&CallMSRUpdated));
   m_asm.MTCTR(12);
   m_asm.BCTRL();
   m_asm.LD(REG_PPC_BASE, REG_SP, 24);       // restore r12 after call
+  // Reload mem_ptr — TLS was restored before the call, but we need mem_ptr
+  // for the block's fast-path memory access.
+  m_asm.LD(REG_PHYS_BASE, REG_PPC_BASE, static_cast<s32>(MEM_PTR_OFFSET));
 
   // NPC = SRR0
   m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_SRR0));

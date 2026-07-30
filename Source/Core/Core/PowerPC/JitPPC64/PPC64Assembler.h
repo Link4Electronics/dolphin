@@ -150,19 +150,22 @@ public:
   }
 
   // -- Compare (opcd=31 X-form with crfD at bits 25:23, L at bit 22) --
-  // PPC CMP X-form: RA at arch bits 10-14 = u32 bits 21:17, RB at arch bits 15-19 = u32 bits 16:12
-  // (different from standard X-form because crfD+L take 4 bits instead of rt's 5 bits)
-  void CMPW(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (0u << 22) | (ra << 17) | (rb << 12) | (0 << 1)); }
-  void CMPLW(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (0u << 22) | (ra << 17) | (rb << 12) | (32 << 1)); }
-  void CMPD(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (1u << 22) | (ra << 17) | (rb << 12) | (0 << 1)); }
-  void CMPLD(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (1u << 22) | (ra << 17) | (rb << 12) | (32 << 1)); }
-  // CMPI/CMPLI (opcd 10/11): RA at arch bits 10-14 = u32 bits 21:17, SIMM at u32 15:0
-  // crfD+L takes 4 bits (arch 6-9), shifting RA 1 bit up vs standard D-form
-  void CMPWI(u32 crf, u32 ra, s32 sim) { Write32((11u << 26) | (crf << 23) | (0u << 22) | (ra << 17) | (sim & 0xFFFF)); }
-  void CMPLWI(u32 crf, u32 ra, u32 ui) { Write32((10u << 26) | (crf << 23) | (0u << 22) | (ra << 17) | (ui & 0xFFFF)); }
-  // CMPDI/CMPLDI (L=1 for 64-bit doubleword compare): same RA/SIMM layout with L=1
-  void CMPDI(u32 crf, u32 ra, s32 sim) { Write32((11u << 26) | (crf << 23) | (1u << 22) | (ra << 17) | (sim & 0xFFFF)); }
-  void CMPLDI(u32 crf, u32 ra, u32 ui) { Write32((10u << 26) | (crf << 23) | (1u << 22) | (ra << 17) | (ui & 0xFFFF)); }
+  // CMP (X-form, opcd=31):
+  //   PPC bits: 0-5=31, 6-8=BF, 9=L, 10=0(reserved), 11-15=rA, 16-20=rB, 21-30=xo, 31=0
+  //   u32 bits: 31-26=opcd, 25-23=BF, 22=L, 21=0, 20-16=rA, 15-11=rB, 10-1=xo
+  //   BF+L take 4 bits (PPC 6-9), leaving rA at PPC 11-15 = u32 20-16 and
+  //   rB at PPC 16-20 = u32 15-11.  No shift difference vs standard X-form.
+  void CMPW(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (0u << 22) | (0u << 21) | (ra << 16) | (rb << 11) | (0 << 1)); }
+  void CMPLW(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (0u << 22) | (0u << 21) | (ra << 16) | (rb << 11) | (32 << 1)); }
+  void CMPD(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (1u << 22) | (0u << 21) | (ra << 16) | (rb << 11) | (0 << 1)); }
+  void CMPLD(u32 crf, u32 ra, u32 rb) { Write32((31u << 26) | (crf << 23) | (1u << 22) | (0u << 21) | (ra << 16) | (rb << 11) | (32 << 1)); }
+  // CMPI/CMPLI/CMPDI/CMPLDI (D-form, opcd 10/11):
+  //   PPC bits: 0-5=opcd, 6-8=BF, 9=L, 10=0(reserved), 11-15=rA, 16-31=SIMM
+  //   u32 bits: 31-26=opcd, 25-23=BF, 22=L, 21=0, 20-16=rA, 15-0=SIMM
+  void CMPWI(u32 crf, u32 ra, s32 sim) { Write32((11u << 26) | (crf << 23) | (0u << 22) | (0u << 21) | (ra << 16) | (sim & 0xFFFF)); }
+  void CMPLWI(u32 crf, u32 ra, u32 ui) { Write32((10u << 26) | (crf << 23) | (0u << 22) | (0u << 21) | (ra << 16) | (ui & 0xFFFF)); }
+  void CMPDI(u32 crf, u32 ra, s32 sim) { Write32((11u << 26) | (crf << 23) | (1u << 22) | (0u << 21) | (ra << 16) | (sim & 0xFFFF)); }
+  void CMPLDI(u32 crf, u32 ra, u32 ui) { Write32((10u << 26) | (crf << 23) | (1u << 22) | (0u << 21) | (ra << 16) | (ui & 0xFFFF)); }
 
   // -- Load/Store (D-form) --
   void LWZ(u32 rt, u32 ra, s32 d) { Write32(D(32, rt, ra, d)); }

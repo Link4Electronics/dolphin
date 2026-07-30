@@ -9,10 +9,14 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
+#include <fmt/format.h>
+
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
 #include "Common/MathUtil.h"
+#include "Core/Core.h"
 #include "Core/CoreTiming.h"
+#include "Core/MachineContext.h"
 #include "Core/HW/CPU.h"
 #include "Core/HW/Memmap.h"
 #include "Core/ConfigManager.h"
@@ -120,9 +124,9 @@ static void FreeCodeRegion(u8* ptr, size_t size)
 // 176(r1)      : saved r10 (clobbered by CompileBC as not-taken flag)
 // 184(r1)      : saved guest EA for backpatch (EA_SAVE_OFFSET)
 // 192(r1)      : PSQ EA save (PSQ_EA_SAVE_OFFSET)
-// 200(r1)..208(r1): saved r13 (PHYS_BASE_SAVE_OFFSET)
+// 200(r1)      : saved mem_ptr in r13 (PHYS_BASE_SAVE_OFFSET) — set after prolog overwrites r13
 // 208(r1)..352(r1): callee-saved FPRs f14-f31 (18 × 8 = 144 bytes)
-// 352(r1)..384(r1): spare
+// 352(r1)      : saved real TLS (TLS_SAVE_OFFSET) — saved before prolog overwrites r13
 static constexpr u32 FRAME_SIZE = 384;
 static constexpr s32 CALLEE_SAVE_FPR_BASE = 208;
 
@@ -393,8 +397,8 @@ void JitPPC64::CompileDispatcher()
   // frame+8 respectively.  SP remains at enter_code_SP - 32.
   m_asm.LD(10, 1, 24);           // restore r10 from dispatcher frame+24
   // PROBE: save intended block entry to global before jumping
-  TrampMOVI64(m_asm, 0, reinterpret_cast<u64>(&g_last_block_entry));
-  m_asm.STD(3, 0, 0);
+  TrampMOVI64(m_asm, REG_SCRATCH2, reinterpret_cast<u64>(&g_last_block_entry));
+  m_asm.STD(3, REG_SCRATCH2, 0);
   m_asm.MTCTR(3);                // block → CTR
   m_asm.BCTR();                  // jump to block (LR = BCTR return address)
 
@@ -429,6 +433,8 @@ void JitPPC64::CompileDispatcher()
   m_asm.BC(4, 1, 0);
 
   // r3 = ppcState.pc → call JitPPC64Dispatch(pc)
+  // Restore TLS before calling C++ — ELFv2 uses r13 as thread pointer.
+  m_asm.LD(REG_PHYS_BASE, 1, TLS_SAVE_OFFSET);
   m_asm.LWZ(3, REG_PPC_BASE, PC_OFFSET);
   TrampMOVI64(m_asm, 12, reinterpret_cast<u64>(&JitPPC64Dispatch));
   m_asm.MTCTR(12);
@@ -443,8 +449,8 @@ void JitPPC64::CompileDispatcher()
   m_asm.ADDI(1, 1, FRAME_SIZE);
   m_asm.MTLR(14);
   // PROBE: save intended block entry to global before jumping
-  TrampMOVI64(m_asm, 0, reinterpret_cast<u64>(&g_last_block_entry));
-  m_asm.STD(3, 0, 0);
+  TrampMOVI64(m_asm, REG_SCRATCH2, reinterpret_cast<u64>(&g_last_block_entry));
+  m_asm.STD(3, REG_SCRATCH2, 0);
   m_asm.MTCTR(3);
   m_asm.BCTR();
 
@@ -459,7 +465,7 @@ void JitPPC64::CompileDispatcher()
   // respectively (set by the block prolog from the dispatcher frame).
   // Run's r10 is at block_SP+FRAME_SIZE+24 (dispatcher frame+24).
   m_dispatcher_exit = m_asm.Code() + m_asm.Size();
-  m_asm.LD(REG_PHYS_BASE, 1, PHYS_BASE_SAVE_OFFSET);
+  m_asm.LD(REG_PHYS_BASE, 1, TLS_SAVE_OFFSET);       // restore real TLS for Run()
   for (u32 i = 14; i <= 31; ++i)
     m_asm.LD(i, 1, static_cast<s32>(CALLEE_SAVE_BASE + (i - 14) * 8));
   // Restore callee-saved FPRs
@@ -527,9 +533,10 @@ void JitPPC64::EmitProlog()
   m_asm.STD(REG_SCRATCH, 1, 16);                 // save Run_LR at block_SP+16
   m_asm.STD(REG_SCRATCH2, 1, static_cast<s32>(R2_SAVE_OFFSET));  // save TOC at block_SP+8
 
-  // Save r10 (clobbered by CompileBC as not-taken flag) and r13 (physical base)
+  // Save r10 (clobbered by CompileBC as not-taken flag) and r13 (real TLS)
+  // Save r13 BEFORE overwriting with mem_ptr — ELFv2 ABI uses r13 as TLS.
   m_asm.STD(10, 1, static_cast<s32>(CALLEE_SAVE_BASE + (31 - 14 + 1) * 8));
-  m_asm.STD(REG_PHYS_BASE, 1, PHYS_BASE_SAVE_OFFSET);
+  m_asm.STD(REG_PHYS_BASE, 1, TLS_SAVE_OFFSET);      // save real TLS
   // and callee-saved registers r14-r31 (used by GPR RegCache)
   for (u32 i = 14; i <= 31; ++i)
     m_asm.STD(i, 1, static_cast<s32>(CALLEE_SAVE_BASE + (i - 14) * 8));
@@ -553,6 +560,9 @@ void JitPPC64::EmitProlog()
   // If null (fastmem arena unavailable), the fast path will fault and be
   // patched to the trampoline slow path automatically.
   m_asm.LD(REG_PHYS_BASE, REG_PPC_BASE, static_cast<s32>(MEM_PTR_OFFSET));
+  // Save mem_ptr separately — C++ calls (backpatch, dispatcher) need TLS
+  // restored before the call and mem_ptr restored after.
+  m_asm.STD(REG_PHYS_BASE, 1, PHYS_BASE_SAVE_OFFSET);
 
   gpr.Reset();
   fpr.Reset();
@@ -630,8 +640,12 @@ void JitPPC64::JustWriteExit(u32 destination, bool bl, u32 after)
     // =====================================================================
     // CALL path with BLR return-address stack push.
     //
+    // IMPORTANT: REG_SCRATCH2 (r11) MUST hold host_ret_addr when pushed at
+    // the STD below.  r11 cannot be clobbered between the ADDI and the push.
+    //
     // Emits:
-    //   [compute host_ret_addr via BL .+4 / MFLR / ADDI]
+    //   [increment BLR depth counter]   ← r11 OK to clobber here
+    //   [compute host_ret_addr via BL .+4 / MFLR / ADDI]  ← r11 = ret addr
     //   [construct guest_val = (feature_flags << 32) | after]
     //   PUSH {guest_val, host_ret_addr} onto host stack
     //   [store destination PC]
@@ -646,6 +660,12 @@ void JitPPC64::JustWriteExit(u32 destination, bool bl, u32 after)
     // =====================================================================
 
     const u8* start_pos = m_asm.Code() + m_asm.Size();
+
+    // --- Increment BLR stack depth counter (before host_ret_addr) ---
+    // r11 is free here — the host_ret_addr computation below will set it.
+    m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(BLR_DEPTH_OFFSET));
+    m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, 1);
+    m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(BLR_DEPTH_OFFSET));
 
     // --- Compute host_ret_addr via BL .+4 / MFLR ---
     // BL .+4: LR = address right after this BL instruction = MFLR address
@@ -670,29 +690,10 @@ void JitPPC64::JustWriteExit(u32 destination, bool bl, u32 after)
       m_asm.ORI(REG_SCRATCH, REG_SCRATCH, static_cast<u16>(after));
     }
 
-    // --- Increment BLR stack depth counter ---
-    // Use r11 — PPC addi with RA=0 uses literal 0.
-    m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(BLR_DEPTH_OFFSET));
-    m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, 1);
-    m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(BLR_DEPTH_OFFSET));
-
-    // Recompute guest_val (r0 was clobbered by the counter increment)
-    if (feature_flags == 0)
-    {
-      m_asm.LI32(REG_SCRATCH, after);
-    }
-    else
-    {
-      m_asm.LI32(REG_SCRATCH, static_cast<u32>(feature_flags));
-      m_asm.RLDICL(REG_SCRATCH, REG_SCRATCH, 32, 0);
-      m_asm.ORIS(REG_SCRATCH, REG_SCRATCH, static_cast<u16>(after >> 16));
-      m_asm.ORI(REG_SCRATCH, REG_SCRATCH, static_cast<u16>(after));
-    }
-
     // --- Push BLR entry: 16 bytes on host stack ---
     m_asm.ADDI(REG_SP, REG_SP, -16);
     m_asm.STD(REG_SCRATCH, REG_SP, 0);   // SP+0 = guest_val
-    m_asm.STD(REG_SCRATCH2, REG_SP, 8);  // SP+8 = host_ret_addr
+    m_asm.STD(REG_SCRATCH2, REG_SP, 8);  // SP+8 = host_ret_addr (r11 intact!)
 
     // --- Store destination PC ---
     m_asm.LI32(REG_SCRATCH, destination);
@@ -761,6 +762,9 @@ void JitPPC64::WriteExceptionExit(u32 destination)
   m_asm.STD(REG_SCRATCH2, REG_SP, 8);
   m_asm.STD(REG_PPC_BASE, REG_SP, 16);
 
+  // Restore TLS before calling C++ — ELFv2 uses r13 as thread pointer.
+  m_asm.LD(REG_PHYS_BASE, REG_SP, TLS_SAVE_OFFSET);
+
   // Call CheckExceptionsFromJIT(m_system.GetPowerPC())
   TrampMOVI64(m_asm, 3, reinterpret_cast<u64>(&m_system.GetPowerPC()));
   TrampMOVI64(m_asm, 12, reinterpret_cast<u64>(&PowerPC::CheckExceptionsFromJIT));
@@ -769,6 +773,9 @@ void JitPPC64::WriteExceptionExit(u32 destination)
 
   // Restore r12 (REG_PPC_BASE — volatile across call)
   m_asm.LD(REG_PPC_BASE, REG_SP, 16);
+
+  // Reload mem_ptr — TLS was restored before the call, block needs it back
+  m_asm.LD(REG_PHYS_BASE, REG_PPC_BASE, static_cast<s32>(MEM_PTR_OFFSET));
 
   // Restore LR
   m_asm.LD(REG_SCRATCH2, REG_SP, 8);
@@ -806,6 +813,9 @@ void JitPPC64::WriteExceptionExitReg(u32 host_reg)
   m_asm.STD(REG_SCRATCH2, REG_SP, 8);
   m_asm.STD(REG_PPC_BASE, REG_SP, 16);
 
+  // Restore TLS before calling C++ — ELFv2 uses r13 as thread pointer.
+  m_asm.LD(REG_PHYS_BASE, REG_SP, TLS_SAVE_OFFSET);
+
   // Call CheckExceptionsFromJIT(m_system.GetPowerPC())
   TrampMOVI64(m_asm, 3, reinterpret_cast<u64>(&m_system.GetPowerPC()));
   TrampMOVI64(m_asm, 12, reinterpret_cast<u64>(&PowerPC::CheckExceptionsFromJIT));
@@ -814,6 +824,9 @@ void JitPPC64::WriteExceptionExitReg(u32 host_reg)
 
   // Restore r12 (REG_PPC_BASE — volatile across call)
   m_asm.LD(REG_PPC_BASE, REG_SP, 16);
+
+  // Reload mem_ptr — TLS was restored before the call, block needs it back
+  m_asm.LD(REG_PHYS_BASE, REG_PPC_BASE, static_cast<s32>(MEM_PTR_OFFSET));
 
   // Restore LR
   m_asm.LD(REG_SCRATCH2, REG_SP, 8);
@@ -1048,6 +1061,14 @@ void JitPPC64::WriteBLRExit()
             static_cast<s32>(SPR_OFFSET + 4 * 8));
   m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 29);
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
+
+  // Restore TLS from the old block frame (still on stack at SP - FRAME_SIZE)
+  // before entering dispatcher_entry — r13 was mem_ptr when the error
+  // occurred, but dispatcher_entry's BCTRL to JitPPC64Dispatch needs TLS.
+  // Old block frame: top of block frame at SP - FRAME_SIZE (before ResetStack
+  // moved SP), TLS saved at block_SP + TLS_SAVE_OFFSET.
+  m_asm.LD(REG_PHYS_BASE, REG_SP, static_cast<s32>(-static_cast<s32>(FRAME_SIZE) +
+                                                     static_cast<s32>(TLS_SAVE_OFFSET)));
 
   // Enter dispatcher_entry (re-enters the normal dispatch loop with
   // a valid dispatcher frame — no block frame exists after ResetStack,
@@ -1425,6 +1446,10 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
   // values for both integer (gpr[rd]) and FPU (ps[rd]) loads.
   m_tramp_asm.STD(REG_PPC_BASE, 1, 48);
 
+  // Restore TLS before calling C++ — ELFv2 uses r13 as thread pointer.
+  // Block frame is at trampoline_SP+128 (trampoline frame is 128 bytes).
+  m_tramp_asm.LD(REG_PHYS_BASE, 1, 128 + TLS_SAVE_OFFSET);
+
   // Call TrampolineDispatcher via absolute address
   TrampMOVI64(m_tramp_asm, 12,
               reinterpret_cast<u64>(&TrampolineDispatcher));
@@ -1454,8 +1479,9 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
   // fault handling may have clobbered it.
   m_tramp_asm.LD(REG_PPC_BASE, 1, 24);
 
-  // Reload REG_PHYS_BASE (r13 = mem_ptr) — the C++ call to
-  // TrampolineDispatcher clobbered it (ELFv2 ABI treats r13 as TLS).
+  // Reload REG_PHYS_BASE (r13 = mem_ptr) — we restored TLS before the call
+  // (see TLS_SAVE_OFFSET load above), the C++ function preserved r13 (= TLS),
+  // and now we need mem_ptr back for fast-path memory access.
   // Load from the block prolog's save at [SP + PHYS_BASE_SAVE_OFFSET].
   m_tramp_asm.LD(REG_PHYS_BASE, 1, PHYS_BASE_SAVE_OFFSET);
 
@@ -1781,6 +1807,9 @@ void JitPPC64::FallBackToInterpreter(UGeckoInstruction inst)
   m_asm.MFLR(REG_SCRATCH2);
   m_asm.STD(REG_SCRATCH2, REG_SP, 8);
   m_asm.STD(REG_PPC_BASE, REG_SP, 16);
+
+  // Restore TLS before calling C++ — ELFv2 uses r13 as thread pointer.
+  m_asm.LD(REG_PHYS_BASE, REG_SP, TLS_SAVE_OFFSET);
 
   // ELFv2 ABI: r3 = this, r4 = inst.hex, r12 = function pointer
   TrampMOVI64(m_asm, 3, reinterpret_cast<u64>(&m_system.GetInterpreter()));

@@ -444,8 +444,7 @@ public:
   static constexpr u32 REG_SCRATCH2 = 11;
   static constexpr u32 REG_PHYS_BASE = 13;
 
-private:
-
+public:
   // Stack frame layout offsets (from block SP)
   static constexpr s32 R2_SAVE_OFFSET = 8;          // saved r2 (TOC) — free slot
   static constexpr s32 CALLEE_SAVE_BASE = 32;     // r14-r31 saves start here
@@ -453,5 +452,7 @@ private:
   // frame layout in Jit.cpp.  r10 saves at 176; EA/r13/PSQ follow; FPRs after.
   static constexpr s32 EA_SAVE_OFFSET = 184;       // saved guest EA for backpatch
   static constexpr s32 PSQ_EA_SAVE_OFFSET = 192;   // saved EA for psq integer helper call
-  static constexpr s32 PHYS_BASE_SAVE_OFFSET = 200; // saved r13 (phys base)
+  static constexpr s32 PHYS_BASE_SAVE_OFFSET = 200; // saved r13 (mem_ptr) — set after EmitProlog loads mem_ptr
+  // Free slots: SP+208..351 (CALLEE_SAVE_FPR_BASE = 208, 18 FPRs × 8 = 144 → end at 352)
+  static constexpr s32 TLS_SAVE_OFFSET = 352;        // saved original r13 (real TLS before overwrite)
 };
