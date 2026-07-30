@@ -1739,26 +1739,39 @@ void JitPPC64::Run()
   {
     auto [stack_addr, stack_size] = Common::GetCurrentThreadStack();
     const uintptr_t sbase = reinterpret_cast<uintptr_t>(stack_addr);
-    volatile u8 canary = 0;
-    const uintptr_t sp_now = reinterpret_cast<uintptr_t>(&canary);
+    uintptr_t sp;
+    asm volatile("mr %0, 1" : "=r"(sp));
     NOTICE_LOG_FMT(POWERPC,
                    "JITPROBE: stack_base={:#018x} size={:#010x} guard={} "
-                   "sp_now={:#018x} canary_page={:#018x}",
+                   "r1={:#018x} r1_page={:#018x} r1_page_off={:#06x}",
                    sbase, stack_size, fmt::ptr(m_stack_guard),
-                   sp_now, sp_now & ~0xFFFFULL);
+                   sp, sp & ~0xFFFFULL, sp & 0xFFFF);
   }
 
   // Stack probe: write to pages below SP to force the kernel to commit them.
   // The JIT prolog does stdu r1,-FRAME_SIZE(r1) which may cross a 64 KB page
   // boundary.  Without this probe, the write to an uncommitted page SIGSEGVs.
+  //
+  // IMPORTANT: probe from the REAL stack pointer (r1), not from &canary.
+  // &canary is within Run()'s frame (above r1), so probing below it may
+  // miss the page at r1-384 if r1-384 is on a different 64 KB page than
+  // &canary *but* in the opposite direction.
+  //
+  // Explanation: r1 points to the lowest address of the current frame
+  // (stack grows down).  Local variables like canary are at r1 + offset
+  // (ABOVE r1).  On 64 KB page systems, r1 may be in a different 64 KB
+  // page than &canary.  Probing from &canary downward only reaches pages
+  // BELOW &canary, but the prolog's STD at r1-384 writes below r1, in
+  // the page *between* r1 and &canary.  If this page wasn't committed,
+  // the STD crashes.
+  //
+  // Fix: probe from r1 itself, ensuring all pages from r1 down to
+  // r1-384KB are committed.
   {
-    volatile u8 canary = 0;
-    const uintptr_t sp = reinterpret_cast<uintptr_t>(&canary);
-    // Probe EVERY 64 KB page from sp down to sp-384KB, ensuring the page 64 KB
-    // below SP (where the prolog's STD lands) is committed.
+    uintptr_t sp;
+    asm volatile("mr %0, 1" : "=r"(sp));
     for (size_t offset = 0; offset < 384 * 1024; offset += 64 * 1024)
       *reinterpret_cast<volatile u8*>(sp - offset) = 0;
-    (void)canary;
   }
 
   // Initialize timebase from CoreTiming before entering JIT.  Without this,
