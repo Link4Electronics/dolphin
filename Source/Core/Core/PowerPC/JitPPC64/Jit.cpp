@@ -56,6 +56,9 @@ JitPPC64* g_jit_ppc64_instance = nullptr;
 // Set by dispatcher just before MTCTR(3)/BCTR — SIGSEGV handler uses this
 // to compare the intended jump target against the actual fault address.
 const u8* volatile g_last_block_entry = nullptr;
+volatile u32 g_probe_pc_1 = 0;
+volatile u32 g_probe_pc_2 = 0;
+volatile u32 g_probe_pc_3 = 0;
 
 static struct sigaction s_old_sigsegv;
 
@@ -422,6 +425,12 @@ void JitPPC64::CompileDispatcher()
   // until we know whether we're exiting (→ m_dispatcher_exit, which restores
   // callee-saved regs from the frame) or continuing (tear down frame, jump).
   m_dispatcher_lite = m_asm.Code() + m_asm.Size();
+
+  // PROBE: store PC to g_probe_pc_1 — confirms block exit reaches dispatcher_lite
+  TrampMOVI64(m_asm, REG_SCRATCH2, reinterpret_cast<u64>(&g_probe_pc_1));
+  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, PC_OFFSET);
+  m_asm.STW(REG_SCRATCH, REG_SCRATCH2, 0);
+
   m_asm.LD(14, 1, 16);   // r14 = Run_LR from block's prolog LR save
 
   // Frame is INTACT here — m_dispatcher_exit will restore callee-saved regs
@@ -436,6 +445,11 @@ void JitPPC64::CompileDispatcher()
   // Restore TLS before calling C++ — ELFv2 uses r13 as thread pointer.
   m_asm.LD(REG_PHYS_BASE, 1, TLS_SAVE_OFFSET);
   m_asm.LWZ(3, REG_PPC_BASE, PC_OFFSET);
+
+  // PROBE: store dispatch PC to g_probe_pc_2 — confirms PC passed to JitPPC64Dispatch
+  TrampMOVI64(m_asm, REG_SCRATCH2, reinterpret_cast<u64>(&g_probe_pc_2));
+  m_asm.STW(3, REG_SCRATCH2, 0);
+
   TrampMOVI64(m_asm, 12, reinterpret_cast<u64>(&JitPPC64Dispatch));
   m_asm.MTCTR(12);
   m_asm.BCTRL();
@@ -465,6 +479,12 @@ void JitPPC64::CompileDispatcher()
   // respectively (set by the block prolog from the dispatcher frame).
   // Run's r10 is at block_SP+FRAME_SIZE+24 (dispatcher frame+24).
   m_dispatcher_exit = m_asm.Code() + m_asm.Size();
+
+  // PROBE: store PC to g_probe_pc_3 — confirms we're exiting via m_dispatcher_exit
+  TrampMOVI64(m_asm, REG_SCRATCH2, reinterpret_cast<u64>(&g_probe_pc_3));
+  m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, PC_OFFSET);
+  m_asm.STW(REG_SCRATCH, REG_SCRATCH2, 0);
+
   m_asm.LD(REG_PHYS_BASE, 1, TLS_SAVE_OFFSET);       // restore real TLS for Run()
   for (u32 i = 14; i <= 31; ++i)
     m_asm.LD(i, 1, static_cast<s32>(CALLEE_SAVE_BASE + (i - 14) * 8));

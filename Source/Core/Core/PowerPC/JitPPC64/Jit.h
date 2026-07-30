@@ -46,6 +46,13 @@ inline void TrampMOVI64(PPC64Assembler& asm_, u32 rd, u64 imm)
 // where execution actually began.
 extern const u8* volatile g_last_block_entry;
 
+// Probe globals: written by generated JIT code at key junction points.
+// After a hang, the user can check these values to determine where execution
+// stopped (debugger or crash dump).
+extern volatile u32 g_probe_pc_1;   // dispatcher_lite entry — PC from block exit
+extern volatile u32 g_probe_pc_2;   // before dispatch call — PC being dispatched
+extern volatile u32 g_probe_pc_3;   // m_dispatcher_exit — PC at exit
+
 // C dispatch function — defined in JitPPC64_BackPatch.cpp
 extern "C" const u8* JitPPC64Dispatch(u32 pc);
 extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,

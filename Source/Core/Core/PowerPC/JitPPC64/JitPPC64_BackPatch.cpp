@@ -279,6 +279,7 @@ extern "C" const u8* JitPPC64Dispatch(u32 pc)
     return nullptr;
 
   fprintf(stderr, "JITPROBE: dispatch pc=0x%08X\n", pc);
+  fflush(stderr);
 
   // Update the emulated timebase from CoreTiming before each block dispatch.
   // This ensures CompileMFTB's cached SPR reads return fresh values, and that
