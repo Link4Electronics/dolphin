@@ -14,6 +14,7 @@
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
 #include "Common/MathUtil.h"
+#include "Common/Thread.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/MachineContext.h"
@@ -290,8 +291,11 @@ void JitPPC64::Init()
   if (SConfig::GetInstance().bJITNoBlockLinking)
     jo.enableBlocklink = false;
 
-  // Enable BLR return-address prediction optimization
-  InitBLROptimization();
+  // BLR optimization disabled on PPC64 — its guard-page calculation assumes
+  // 4 KB pages, leaving only 64 KB of safe stack space on 64 KB page systems
+  // (< 256 KB required by the check).  We also don't use the return-address
+  // stack that this optimization enables.
+  m_enable_blr_optimization = false;
 
   // Enable all analyzer optimizations for better block analysis
   analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE);
@@ -1731,13 +1735,28 @@ void JitPPC64::Run()
 {
   ProtectStack();
 
+  // Guard probe: print the actual guard address and stack bounds
+  {
+    auto [stack_addr, stack_size] = Common::GetCurrentThreadStack();
+    const uintptr_t sbase = reinterpret_cast<uintptr_t>(stack_addr);
+    volatile u8 canary = 0;
+    const uintptr_t sp_now = reinterpret_cast<uintptr_t>(&canary);
+    NOTICE_LOG_FMT(POWERPC,
+                   "JITPROBE: stack_base={:#018x} size={:#010x} guard={} "
+                   "sp_now={:#018x} canary_page={:#018x}",
+                   sbase, stack_size, fmt::ptr(m_stack_guard),
+                   sp_now, sp_now & ~0xFFFFULL);
+  }
+
   // Stack probe: write to pages below SP to force the kernel to commit them.
   // The JIT prolog does stdu r1,-FRAME_SIZE(r1) which may cross a 64 KB page
   // boundary.  Without this probe, the write to an uncommitted page SIGSEGVs.
   {
     volatile u8 canary = 0;
     const uintptr_t sp = reinterpret_cast<uintptr_t>(&canary);
-    for (size_t offset = 0; offset < 256 * 1024; offset += 64 * 1024)
+    // Probe EVERY 64 KB page from sp down to sp-384KB, ensuring the page 64 KB
+    // below SP (where the prolog's STD lands) is committed.
+    for (size_t offset = 0; offset < 384 * 1024; offset += 64 * 1024)
       *reinterpret_cast<volatile u8*>(sp - offset) = 0;
     (void)canary;
   }
