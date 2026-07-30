@@ -416,7 +416,7 @@ bool JitPPC64::CompilePairedLoadStore(UGeckoInstruction inst)
   // Save guest EA for update-form RA write-back, then translate to host address
   if (update)
     m_asm.STD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);
-  m_asm.RLDICL(REG_SCRATCH2, REG_SCRATCH2, 0, 32);
+  m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 2, 31);
   m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE);
 
   if (type == QUANTIZE_FLOAT)

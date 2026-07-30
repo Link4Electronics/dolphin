@@ -1407,11 +1407,11 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
   if (jo.fastmem)
   {
     // Fast path: translate EA to host address via fastmem arena.
-    // EA is the full 32-bit guest address (zero-extend to 64 bits).
-    // host_addr = REG_PHYS_BASE + zext32(EA)
-    // On PPC64, RLDICL with mb=32 clears the upper 32 bits, producing
-    // a zero-extended 32-bit value (equivalent to JIT64's ADD(32,...)).
-    m_asm.RLDICL(REG_SCRATCH2, REG_SCRATCH2, 0, 32);
+    // Guest addresses use K1 (0x80000000) and K2 (0xC0000000, 0xE0000000)
+    // alias bits; mask to physical address with 0x3FFFFFFF (30-bit mask
+    // covering MEM1/MEM2 up to 1 GB).  RLWINM clears the top 2 bits of
+    // the 32-bit word, giving the equivalent of (EA & 0x3FFFFFFF).
+    m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 2, 31);
     m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE);
 
     if (is_fpr)
@@ -1735,43 +1735,57 @@ void JitPPC64::Run()
 {
   ProtectStack();
 
-  // Guard probe: print the actual guard address and stack bounds
+  // Stack probe: commit all stack pages before entering the JIT.
+  //
+  // The JIT block prolog does stdu r1,-FRAME_SIZE(r1) which writes to a page
+  // below the current SP.  On 64 KB page systems, this write may land on a
+  // page that the kernel has not yet committed (the stack grows one page at
+  // a time, and the JIT's frame is much smaller than 64 KB — even a single
+  // C++ function call may push SP past a page boundary).
+  //
+  // Worse, the SP at block entry may be ABOVE the SP captured here (e.g. if
+  // a prior block's exit path restored SP to a value higher than Run()'s
+  // frame).  The prolog's STD at r1-384 then writes to a page above the
+  // probed region, causing SIGSEGV.
+  //
+  // Fix: probe EVERY 64 KB page in the stack region from stack_base to
+  // stack_end (as reported by pthread_getattr_np).  This guarantees every
+  // page is committed regardless of where SP ends up during JIT execution.
+  //
+  // Additionally, probe pages above the current SP up to stack_end + 128 KB
+  // to catch the case where SP has been restored above Run()'s frame by
+  // the m_dispatcher_exit path (ADDI +FRAME_SIZE+32).
   {
     auto [stack_addr, stack_size] = Common::GetCurrentThreadStack();
     const uintptr_t sbase = reinterpret_cast<uintptr_t>(stack_addr);
+    const uintptr_t send = sbase + stack_size;
     uintptr_t sp;
     asm volatile("mr %0, 1" : "=r"(sp));
-    NOTICE_LOG_FMT(POWERPC,
-                   "JITPROBE: stack_base={:#018x} size={:#010x} guard={} "
-                   "r1={:#018x} r1_page={:#018x} r1_page_off={:#06x}",
-                   sbase, stack_size, fmt::ptr(m_stack_guard),
-                   sp, sp & ~0xFFFFULL, sp & 0xFFFF);
-  }
 
-  // Stack probe: write to pages below SP to force the kernel to commit them.
-  // The JIT prolog does stdu r1,-FRAME_SIZE(r1) which may cross a 64 KB page
-  // boundary.  Without this probe, the write to an uncommitted page SIGSEGVs.
-  //
-  // IMPORTANT: probe from the REAL stack pointer (r1), not from &canary.
-  // &canary is within Run()'s frame (above r1), so probing below it may
-  // miss the page at r1-384 if r1-384 is on a different 64 KB page than
-  // &canary *but* in the opposite direction.
-  //
-  // Explanation: r1 points to the lowest address of the current frame
-  // (stack grows down).  Local variables like canary are at r1 + offset
-  // (ABOVE r1).  On 64 KB page systems, r1 may be in a different 64 KB
-  // page than &canary.  Probing from &canary downward only reaches pages
-  // BELOW &canary, but the prolog's STD at r1-384 writes below r1, in
-  // the page *between* r1 and &canary.  If this page wasn't committed,
-  // the STD crashes.
-  //
-  // Fix: probe from r1 itself, ensuring all pages from r1 down to
-  // r1-384KB are committed.
-  {
-    uintptr_t sp;
-    asm volatile("mr %0, 1" : "=r"(sp));
-    for (size_t offset = 0; offset < 384 * 1024; offset += 64 * 1024)
-      *reinterpret_cast<volatile u8*>(sp - offset) = 0;
+    NOTICE_LOG_FMT(POWERPC,
+                   "JITPROBE: stack_base={:#018x} stack_end={:#018x} "
+                   "guard={} r1={:#018x}",
+                   sbase, send, fmt::ptr(m_stack_guard), sp);
+
+    // Probe downward: from current SP down to stack_base, in 64 KB steps.
+    // The for-loop condition uses signed comparison because sp > send when
+    // sp is near the top of the stack.
+    for (uintptr_t page = sp & ~static_cast<uintptr_t>(0xFFFF);
+         static_cast<intptr_t>(page) >= static_cast<intptr_t>(sbase);
+         page -= 0x10000)
+    {
+      *reinterpret_cast<volatile u8*>(page) = 0;
+    }
+
+    // Probe upward: from current SP up to send, in 64 KB steps.
+    // This covers the case where m_dispatcher_exit restores SP above
+    // Run()'s frame.  Cap at send to avoid probing unmapped memory.
+    for (uintptr_t page = (sp + 0x10000) & ~static_cast<uintptr_t>(0xFFFF);
+         page < send;
+         page += 0x10000)
+    {
+      *reinterpret_cast<volatile u8*>(page) = 0;
+    }
   }
 
   // Initialize timebase from CoreTiming before entering JIT.  Without this,

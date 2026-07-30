@@ -1064,41 +1064,27 @@ always sees `elapsed = 0 - 0 = 0`, which is never ≥ delay, so the loop runs fo
 
 This makes tight timing loops within a block see time advance by 1 tick per `mftb` call, ensuring they eventually exit. At block boundaries, the timebase is refreshed to the real emulated value from CoreTiming.
 
-## Session 2026-07-29 (late): Fast Path EA Mask Corruption (Blocking Bug)
+## Session 2026-07-30: RLDICL Fast Path Revert + Stack Probe Fix
 
-### Symptom
+### Fast Path Address Translation — RLWINM Revert
 
-Block at 0x81200150 compiles and executes. MMU reports `Unable to resolve write address fff0004f PC 81200150`. Heap corruption (`malloc(): unaligned tcache chunk detected`) follows, caused by fast path writes landing on wrong RAM pages.
+**Status:** REVERTED. The `RLDICL(..., 0, 32)` change from Session 2026-07-29 was incorrect and has been reverted back to `RLWINM(..., 0, 2, 31)`.
 
-### Root Cause
+**Why RLWINM was correct:** The GameCube/Wii PPC uses K1 cached alias `0x80000000-0x9FFFFFFF` and K2 uncached aliases `0xC0000000-0xDFFFFFFF, 0xE0000000-0xFFFFFFFF` to access physical memory `0x00000000-0x1FFFFFFF`. The RLWINM mask `EA & 0x3FFFFFFF` correctly converts all aliased addresses to their physical equivalent. This 30-bit mask covers 1 GB of physical address space (MEM1 + MEM2 + MMIO ranges).
 
-The fast path address translation uses `RLWINM(r11, r11, 0, 2, 31)` which is `EA & 0x3FFFFFFF` (30-bit mask). This clears **both** bit 30 and bit 31 (the top 2 bits) of the 32-bit guest address. For any EA ≥ 0x40000000, the address is truncated:
+**Why RLDICL was wrong:** `RLDICL(..., 0, 32)` zero-extends to 64 bits but keeps the K1/K2 alias bits. When `mem_ptr` maps physical 0 to a host address, `mem_ptr + 0x81200150` accesses 2 GB ABOVE the correct physical address. If the wrong address falls in a mapped region (e.g., heap), silent data corruption occurs → malloc crashes later.
 
-| Guest EA | `& 0x3FFFFFFF` | Intended `zext32(EA)` |
-|----------|----------------|-----------------------|
-| 0x81200150 (IPL code) | 0x01200150 | 0x81200150 |
-| 0xFFF0004F (MMIO) | 0x3FF0004F | 0xFFF0004F |
-| 0x81712345 (stack) | 0x01712345 | 0x81712345 |
+**Effect of revert:** The 5 fast path locations (EmitBackpatchRoutine, stfiwx, CompileLMW, CompileSTMW, psq_l/st) now correctly convert K1/K2 aliases to physical addresses before adding to mem_ptr.
 
-The fast path then computes `host = mem_ptr + truncated_EA`. When the truncated value happens to fall within a validly-mapped RAM page (e.g., 0x01712345 falls in MEM1 range at physical 0x00000000-0x01800000), the write succeeds **silently** but writes to the **wrong physical address**, corrupting memory.
+### Run() Stack Probe Fix (64 KB Page Systems)
 
-For EA = 0x81712345 (stack):
-- Fast path: `mem_ptr + 0x01712345` → hits MEM1 RAM at physical 0x01712345 ✓ mapped, ✗ wrong address
-- Correct: `mem_ptr + 0x81712345` → hits RAM at physical 0x81712345 (K1 cached alias range)
+**Problem:** Block prolog `stdu r1,-FRAME_SIZE(r1)` crashes with SIGSEGV on PPC64 with 64 KB pages. The initial probe used `&canary` as reference — on 64 KB page systems, `r1` may be on a different page than `&canary`, so probing from `&canary` downward misses the page at `r1-384`.
 
-### JIT64 Comparison
+The fix then used real `r1` (via `asm volatile`) and probed 384 KB downward. However, the m_dispatcher_exit path (`ADDI(1,1,FRAME_SIZE+32)`) can restore r1 to a value above Run()'s frame (the probe's reference point), causing the prolog's STD at `r1-384` to target a page above the probed region that the kernel hasn't committed.
 
-JIT64 uses `ADD(32, RSCRATCH2, RSCRATCH)` which naturally truncates to 32 bits (keeping all 32 bits of EA). On PPC64, the RLWINM mask was a bad copy of JIT64's intent — it should match the 32-bit *add* semantics, not mask to 30 bits.
+**Fix (`Jit.cpp:1738-1789`):** Probe EVERY 64 KB page in the full stack region (from `stack_base` to `stack_end` as reported by `pthread_getattr_np`), plus pages above current SP up to `stack_end`. This guarantees all stack pages are committed regardless of where r1 ends up during JIT execution.
 
-### Fix
+Downward loop: from current SP to `stack_base` in 64 KB steps. Upward loop: from current SP up to `stack_end` in 64 KB steps, capped at `stack_end` to avoid probing unmapped memory above the stack.
 
-Replace all 5 fast path `RLWINM(..., 0, 2, 31)` with `RLDICL(..., 0, 32)` which zero-extends the full 32-bit EA to 64 bits:
-
-| File | Line | Fix |
-|------|------|-----|
-| `Jit.cpp` | 1397 | `RLWINM(r11, r11, 0, 2, 31)` → `RLDICL(r11, r11, 0, 32)` — `EmitBackpatchRoutine` |
-| `JitPPC64_LoadStore.cpp` | 824 | Same — `stfiwx` inline fast path |
-| `JitPPC64_LoadStore.cpp` | 873 | Same — `CompileLMW` |
-| `JitPPC64_LoadStore.cpp` | 902 | Same — `CompileSTMW` |
-| `JitPPC64_Paired.cpp` | 419 | Same — `CompilePairedSingle` psq_l/st |
+**Also:** Disabled BLR optimization (`m_enable_blr_optimization = false`) to prevent stack guard page interference with the 64 KB page layout.
 
