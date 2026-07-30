@@ -1767,22 +1767,29 @@ void JitPPC64::Run()
                    "guard={} r1={:#018x}",
                    sbase, send, fmt::ptr(m_stack_guard), sp);
 
-    // Probe downward: from current SP down to stack_base, in 64 KB steps.
-    // The for-loop condition uses signed comparison because sp > send when
-    // sp is near the top of the stack.
-    for (uintptr_t page = sp & ~static_cast<uintptr_t>(0xFFFF);
+    // Probe downward: from current SP down to stack_base, in 4 KB steps.
+    // IMPORTANT: use 4 KB granularity, NOT 64 KB.  On PPC64 with 64 KB
+    // pages, writing a single byte at a 64 KB boundary only commits the
+    // first 4 KB subpage.  The block prolog's STD at r1-384 may land in
+    // a different 4 KB subpage of the same 64 KB page, which is still
+    // uncommitted → SIGSEGV.  Probing every 4 KB subpage guarantees all
+    // subpages are committed regardless of access offset.
+    //
+    // The for-loop condition uses signed comparison to handle wraparound
+    // after page underflows past 0.
+    for (uintptr_t page = sp & ~static_cast<uintptr_t>(0xFFF);
          static_cast<intptr_t>(page) >= static_cast<intptr_t>(sbase);
-         page -= 0x10000)
+         page -= 0x1000)
     {
       *reinterpret_cast<volatile u8*>(page) = 0;
     }
 
-    // Probe upward: from current SP up to send, in 64 KB steps.
+    // Probe upward: from current SP up to send, in 4 KB steps.
     // This covers the case where m_dispatcher_exit restores SP above
     // Run()'s frame.  Cap at send to avoid probing unmapped memory.
-    for (uintptr_t page = (sp + 0x10000) & ~static_cast<uintptr_t>(0xFFFF);
+    for (uintptr_t page = (sp + 0x1000) & ~static_cast<uintptr_t>(0xFFF);
          page < send;
-         page += 0x10000)
+         page += 0x1000)
     {
       *reinterpret_cast<volatile u8*>(page) = 0;
     }

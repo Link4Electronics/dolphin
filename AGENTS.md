@@ -1082,9 +1082,9 @@ This makes tight timing loops within a block see time advance by 1 tick per `mft
 
 The fix then used real `r1` (via `asm volatile`) and probed 384 KB downward. However, the m_dispatcher_exit path (`ADDI(1,1,FRAME_SIZE+32)`) can restore r1 to a value above Run()'s frame (the probe's reference point), causing the prolog's STD at `r1-384` to target a page above the probed region that the kernel hasn't committed.
 
-**Fix (`Jit.cpp:1738-1789`):** Probe EVERY 64 KB page in the full stack region (from `stack_base` to `stack_end` as reported by `pthread_getattr_np`), plus pages above current SP up to `stack_end`. This guarantees all stack pages are committed regardless of where r1 ends up during JIT execution.
+**Fix (`Jit.cpp:1738-1789`):** Probe EVERY 4 KB subpage in the full stack region (from `stack_base` to `stack_end` as reported by `pthread_getattr_np`), plus pages above current SP up to `stack_end`. On PPC64 with 64 KB pages, writing a single byte at a 64 KB boundary only commits the first 4 KB subpage — the remaining 15 subpages remain uncommitted. The block prolog's STD at `r1-384` may land in any subpage, so 4 KB granularity is required.
 
-Downward loop: from current SP to `stack_base` in 64 KB steps. Upward loop: from current SP up to `stack_end` in 64 KB steps, capped at `stack_end` to avoid probing unmapped memory above the stack.
+Downward loop: from current SP to `stack_base` in 4 KB steps. Upward loop: from current SP up to `stack_end` in 4 KB steps, capped at `stack_end` to avoid probing unmapped memory above the stack.
 
 **Also:** Disabled BLR optimization (`m_enable_blr_optimization = false`) to prevent stack guard page interference with the 64 KB page layout.
 
