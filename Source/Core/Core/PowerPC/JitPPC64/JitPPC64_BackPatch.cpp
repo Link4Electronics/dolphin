@@ -281,16 +281,6 @@ extern "C" const u8* JitPPC64Dispatch(u32 pc)
   fprintf(stderr, "JITPROBE: dispatch pc=0x%08X\n", pc);
   fflush(stderr);
 
-  // Update the emulated timebase from CoreTiming before each block dispatch.
-  // This ensures CompileMFTB's cached SPR reads return fresh values, and that
-  // the timebase advances between loop iterations (even within the same slice,
-  // because downcount decreases between dispatches).
-  {
-    const u64 tb = jit->m_system.GetSystemTimers().GetFakeTimeBase();
-    TL(jit->m_ppc_state) = static_cast<u32>(tb);
-    TU(jit->m_ppc_state) = static_cast<u32>(tb >> 32);
-  }
-
   JitBlock* block =
       jit->GetBlockCache()->GetBlockFromStartAddress(pc, jit->m_ppc_state.feature_flags);
   if (!block)

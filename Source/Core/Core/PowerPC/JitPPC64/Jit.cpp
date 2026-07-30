@@ -19,6 +19,7 @@
 #include "Core/MachineContext.h"
 #include "Core/HW/CPU.h"
 #include "Core/HW/Memmap.h"
+#include "Core/HW/SystemTimers.h"
 #include "Core/ConfigManager.h"
 #include "Core/PowerPC/Gekko.h"
 #include "Core/PowerPC/Interpreter/Interpreter.h"
@@ -1732,12 +1733,31 @@ void JitPPC64::Run()
     (void)canary;
   }
 
+  // Initialize timebase from CoreTiming before entering JIT.  Without this,
+  // CompileMFTB's per-read increments are overwritten every dispatch by
+  // JitPPC64Dispatch's GetFakeTimeBase call.  With GetFakeTimeBase removed
+  // from the dispatch path, we set it here once per slice so the JIT sees
+  // a starting timebase that advances across slices while CompileMFTB's
+  // per-read increments accumulate within each slice.
+  {
+    const u64 tb = m_system.GetSystemTimers().GetFakeTimeBase();
+    m_ppc_state.spr[SPR_TL] = static_cast<u32>(tb);
+    m_ppc_state.spr[SPR_TU] = static_cast<u32>(tb >> 32);
+  }
+
   auto& core_timing = m_system.GetCoreTiming();
   auto& cpu = m_system.GetCPU();
 
   while (cpu.GetState() == CPU::State::Running)
   {
     core_timing.Advance();
+
+    // Refresh timebase after CoreTiming advance so JIT sees new base value
+    {
+      const u64 tb = m_system.GetSystemTimers().GetFakeTimeBase();
+      m_ppc_state.spr[SPR_TL] = static_cast<u32>(tb);
+      m_ppc_state.spr[SPR_TU] = static_cast<u32>(tb >> 32);
+    }
 
     while (m_ppc_state.downcount > 0 && cpu.GetState() == CPU::State::Running)
     {
