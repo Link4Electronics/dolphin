@@ -53,6 +53,16 @@ extern volatile u32 g_probe_pc_1;   // dispatcher_lite entry — PC from block e
 extern volatile u32 g_probe_pc_2;   // before dispatch call — PC being dispatched
 extern volatile u32 g_probe_pc_3;   // m_dispatcher_exit — PC at exit
 
+// Fast-path store probes: written by generated JIT code (EmitStoreProbe) in
+// EmitBackpatchRoutine and CompilePairedLoadStore (stores only) immediately
+// before the memory access.  Used to diagnose heap corruption from a
+// wrong-but-valid EA (masks into the backed-RAM arena window).  After a
+// crash/hang the user reads these to find the last store executed.
+extern volatile u64 g_stm_last_ea;     // guest EA of the last probed store
+extern volatile u32 g_stm_ea12;        // (EA & 0xFFF) << 12 — page offset in high bits
+extern volatile u64 g_stm_last_host;   // host address the store was translated to
+extern volatile u32 g_probe_block_addr; // start address of the JIT block doing the store
+
 // C dispatch function — defined in JitPPC64_BackPatch.cpp
 extern "C" const u8* JitPPC64Dispatch(u32 pc);
 extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
@@ -250,6 +260,13 @@ private:
   // is patched with a branch to it.
   void EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd, u32 ra, u32 data_reg,
                               bool is_load, bool is_fpr = false);
+
+  // Emit a store probe: record EA / host address / block to the diagnostic
+  // globals (g_stm_last_ea, g_stm_ea12, g_stm_last_host, g_probe_block_addr).
+  // Precondition: REG_SCRATCH2 (r11) holds the host address and the guest EA
+  // is in the EA_SAVE_OFFSET frame slot.  Clobbers REG_SCRATCH (r0); restores
+  // r11 to the host address on exit.
+  void EmitStoreProbe();
 
   // ---- Helpers (Jit.cpp) ----
   void LoadGPR(u32 host_reg, u32 guest_reg);

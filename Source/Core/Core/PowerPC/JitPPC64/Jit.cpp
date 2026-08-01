@@ -68,6 +68,16 @@ volatile u32 g_probe_pc_1 = 0;
 volatile u32 g_probe_pc_2 = 0;
 volatile u32 g_probe_pc_3 = 0;
 
+// Fast-path store probes: written by generated JIT code (EmitStoreProbe)
+// right before every store in the fastmem arena.  Used to diagnose heap
+// corruption from a wrong-but-valid EA (e.g. 0x3FF0004F masks into the
+// backed-RAM arena window).  After a crash/hang, read these to find the
+// last store executed and where it was translated to.
+volatile u64 g_stm_last_ea = 0;       // last probed store: guest EA
+volatile u32 g_stm_ea12 = 0;          // (EA & 0xFFF) << 12 — page offset in high bits
+volatile u64 g_stm_last_host = 0;     // host address the store was translated to
+volatile u32 g_probe_block_addr = 0;  // start address of the JIT block doing the store
+
 static struct sigaction s_old_sigsegv;
 
 // code_region address for signal handler debug output
@@ -231,6 +241,14 @@ static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
       g_jit_ppc64_instance->DumpCode(reinterpret_cast<const u8*>(ctx->CTX_NIP) - 16, 48);
     fprintf(stderr, "JIT: g_last_block_entry = %p (intended jump target)\n",
             reinterpret_cast<const void*>(g_last_block_entry));
+    fprintf(stderr, "JIT: fault NIP=0x%08llX addr=0x%08llX r1=0x%08llX\n",
+            static_cast<unsigned long long>(ctx->CTX_NIP),
+            static_cast<unsigned long long>(access_addr),
+            static_cast<unsigned long long>(ctx->regs->gpr[1]));
+    fprintf(stderr,
+            "JIT: last store probe: EA=0x%08llX ea12=0x%08X host=0x%08llX block=0x%08X\n",
+            static_cast<unsigned long long>(g_stm_last_ea), g_stm_ea12,
+            static_cast<unsigned long long>(g_stm_last_host), g_probe_block_addr);
     g_jit_ppc64_instance->DoBacktrace();
   }
 
@@ -1380,6 +1398,41 @@ void JitPPC64::EmitSetXER_OV(u32 r_ov)
 }
 
 // ===========================================================================
+// EmitStoreProbe — record store EA / host address / block to globals
+//
+// Emitted immediately before a fast-path store memory access, stores only.
+// Precondition: r11 (REG_SCRATCH2) = host address; guest EA in EA_SAVE_OFFSET.
+// Only REG_SCRATCH (r0) is clobbered; r11 is restored to the host address so
+// the subsequent store instruction uses the correct pointer.
+// ===========================================================================
+void JitPPC64::EmitStoreProbe()
+{
+  // r0 = guest EA (reload from the frame slot saved by the caller)
+  m_asm.LD(REG_SCRATCH, 1, EA_SAVE_OFFSET);
+
+  // g_stm_last_ea = guest EA
+  TrampMOVI64(m_asm, REG_SCRATCH2, reinterpret_cast<u64>(&g_stm_last_ea));
+  m_asm.STD(REG_SCRATCH, REG_SCRATCH2, 0);
+
+  // g_stm_ea12 = (EA & 0xFFF) << 12
+  m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 12, 12, 23);
+  TrampMOVI64(m_asm, REG_SCRATCH2, reinterpret_cast<u64>(&g_stm_ea12));
+  m_asm.STW(REG_SCRATCH, REG_SCRATCH2, 0);
+
+  // g_probe_block_addr = block start PC
+  TrampMOVI64(m_asm, REG_SCRATCH2, reinterpret_cast<u64>(&g_probe_block_addr));
+  m_asm.LI32(REG_SCRATCH, m_block_start);
+  m_asm.STW(REG_SCRATCH, REG_SCRATCH2, 0);
+
+  // g_stm_last_host = r11 (host address) — recompute r11 from saved EA first
+  m_asm.LD(REG_SCRATCH, 1, EA_SAVE_OFFSET);
+  m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH, 0, 2, 31);
+  m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE);
+  TrampMOVI64(m_asm, REG_SCRATCH, reinterpret_cast<u64>(&g_stm_last_host));
+  m_asm.STD(REG_SCRATCH2, REG_SCRATCH, 0);
+}
+
+// ===========================================================================
 // EmitBackpatchRoutine — emit fast path + trampoline slow path
 //
 // Called from CompileLoadStore after the EA is in REG_SCRATCH2 (r11) and
@@ -1413,6 +1466,13 @@ void JitPPC64::EmitBackpatchRoutine(u32 access_size, u32 opcd, u32 rd,
     // the 32-bit word, giving the equivalent of (EA & 0x3FFFFFFF).
     m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 2, 31);
     m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE);
+
+    // Diagnostic probe: record the store's EA / host address / block before
+    // the access.  Only REG_SCRATCH (r0) is clobbered; r11 stays host address.
+    // Skipped when the store value lives in REG_SCRATCH itself (r0 as data_reg)
+    // — FPR stores (is_fpr) hold data in FPR0, so r0 is free and they are probed.
+    if (!is_load && (is_fpr || data_reg != REG_SCRATCH))
+      EmitStoreProbe();
 
     if (is_fpr)
     {
@@ -1617,6 +1677,9 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
 
   fprintf(stderr, "JITPROBE: compiling block at 0x%08X (%u instr)\n",
           em_address, code_block.m_num_instructions);
+
+  // Record block start for the store probe (g_probe_block_addr).
+  m_block_start = em_address;
 
   // Per-instruction fallback: unhandled opcodes call FallBackToInterpreter
   // (no block-level reject gate).

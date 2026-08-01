@@ -413,11 +413,15 @@ bool JitPPC64::CompilePairedLoadStore(UGeckoInstruction inst)
       m_asm.ADDI(REG_SCRATCH2, gpr.R(inst.RA), simm);
   }
 
-  // Save guest EA for update-form RA write-back, then translate to host address
-  if (update)
-    m_asm.STD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);
+  // Save guest EA for update-form RA write-back and for EmitStoreProbe, then
+  // translate to host address
+  m_asm.STD(REG_SCRATCH2, 1, EA_SAVE_OFFSET);
   m_asm.RLWINM(REG_SCRATCH2, REG_SCRATCH2, 0, 2, 31);
   m_asm.ADD(REG_SCRATCH2, REG_SCRATCH2, REG_PHYS_BASE);
+
+  // Diagnostic probe: record the store's EA / host address / block.
+  if (!is_load)
+    EmitStoreProbe();
 
   if (type == QUANTIZE_FLOAT)
   {
