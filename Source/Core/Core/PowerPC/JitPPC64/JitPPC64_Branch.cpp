@@ -101,7 +101,7 @@ void JitPPC64::EmitCRCheck(u32 bi, bool cr_true)
 bool JitPPC64::CompileB(UGeckoInstruction inst)
 {
   s32 li = static_cast<s32>(inst.LI << 8) >> 6;
-  u32 target = inst.AA ? static_cast<u32>(li) : (js.compilerPC + 4) + li;
+  u32 target = inst.AA ? static_cast<u32>(li) : js.compilerPC + li;
 
   EmitBranchCounter();
 
@@ -147,7 +147,7 @@ bool JitPPC64::CompileBC(UGeckoInstruction inst)
   FlushCR0IfDirty();
 
   const s32 bd = static_cast<s32>(inst.BD << 16) >> 14;
-  const u32 target = inst.AA ? static_cast<u32>(bd) : (js.compilerPC + 4) + bd;
+  const u32 target = inst.AA ? static_cast<u32>(bd) : js.compilerPC + bd;
   const u32 next_pc = js.compilerPC + 4;
 
   // Unconditional: both CR and CTR checks skipped
