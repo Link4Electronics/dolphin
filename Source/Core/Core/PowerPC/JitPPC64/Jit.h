@@ -221,6 +221,13 @@ private:
   bool CompileMisc(UGeckoInstruction inst);
 
   // ---- Block linking exits ----
+  // Decrements downcount by js.downcountAmount, then if the result is ≤ 0
+  // branches to m_dispatcher_exit (returning to Run() so CoreTiming can
+  // advance).  Must precede every linkable exit: WriteLinkBlock patches the
+  // following BRel to jump straight to the destination block's normalEntry,
+  // which would otherwise bypass dispatcher_lite's downcount check and let
+  // linked loops spin forever without emulated time advancing.
+  void EmitDowncountAndBail();
   void WriteExit(u32 destination, bool bl, u32 after);
   void JustWriteExit(u32 destination, bool bl = false, u32 after = 0);
   void WriteExceptionExit(u32 destination);

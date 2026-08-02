@@ -217,12 +217,11 @@ bool JitPPC64::CompileBC(UGeckoInstruction inst)
 
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
 
-  // Decrement downcount — must use r11 (REG_SCRATCH2), NOT r0 (REG_SCRATCH).
-  // On PPC, addi rD, 0, SI means rD = 0 + SI (RA=0 → source is literal zero).
-  // So addi r0, r0, -N produces -N, discarding the LWZ result.
-  m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
-  m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, -static_cast<s32>(js.downcountAmount));
-  m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  // Decrement downcount, bail to Run() when it reaches zero (inline check —
+  // the BRel below gets linked to the destination block's normalEntry,
+  // bypassing dispatcher_lite's own downcount check).  Without this, a linked
+  // back-edge loops forever with emulated time frozen.
+  EmitDowncountAndBail();
 
   // Jump to dispatcher_lite — record linkData so WriteLinkBlock can patch
   // this BRel to jump directly to the destination block once it's compiled.

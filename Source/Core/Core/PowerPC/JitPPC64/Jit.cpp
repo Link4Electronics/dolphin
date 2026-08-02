@@ -691,6 +691,28 @@ void JitPPC64::EmitEpilog(u32 next_pc)
 // block linking, it gets patched to `b dest_normalEntry`.
 // ===========================================================================
 
+void JitPPC64::EmitDowncountAndBail()
+{
+  // Decrement downcount by the block's cycle estimate.  If the result is
+  // ≤ 0, branch to m_dispatcher_exit (restores callee-saved regs, returns to
+  // Run(), which advances CoreTiming and refills downcount).  This check MUST
+  // be inline in the exit code BEFORE the linkable BRel: WriteLinkBlock
+  // patches that BRel to jump directly to the destination block's
+  // normalEntry, bypassing dispatcher_lite — without this inline check, a
+  // linked loop back-edge never lets emulated time advance (the boot DMA
+  // wait loop spun forever because the done bit was only set by a CoreTiming
+  // event that never fired).
+  m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, -static_cast<s32>(js.downcountAmount));
+  m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+
+  // if (downcount > 0) skip the bail; else branch to m_dispatcher_exit.
+  // BC(12, 1, 8): branch on CR0[GT]; bd=8 skips the next (single) instruction.
+  m_asm.CMPWI(0, REG_SCRATCH2, 0);
+  m_asm.BC(12, 1, 8);
+  m_asm.BRel(m_dispatcher_exit);
+}
+
 void JitPPC64::WriteExit(u32 destination, bool bl, u32 after)
 {
   gpr.Flush(js.op);
@@ -698,11 +720,16 @@ void JitPPC64::WriteExit(u32 destination, bool bl, u32 after)
   FlushCarry();
   FlushCR0IfDirty();
 
-  // Subtract block's estimated instruction count from downcount
-  // Use r11 (REG_SCRATCH2), not r0 — PPC addi with RA=0 uses literal 0.
-  m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
-  m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, -static_cast<s32>(js.downcountAmount));
-  m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(DOWNCOUNT_OFFSET));
+  // Store the destination PC FIRST: the downcount bail below returns to Run()
+  // (which reads ppcState.pc to dispatch the next block), so PC must already
+  // be correct when the bail is taken.  JustWriteExit stores it again — the
+  // redundant store is harmless.
+  m_asm.LI32(REG_SCRATCH, destination);
+  m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
+
+  // Subtract block's estimated instruction count from downcount and bail to
+  // Run() if it reaches zero — checked inline so linked exits can't bypass it.
+  EmitDowncountAndBail();
 
   JustWriteExit(destination, bl, after);
 }
@@ -867,6 +894,9 @@ void JitPPC64::WriteExceptionExit(u32 destination)
   m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET + 4));
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
 
+  // Decrement downcount with inline bail (matches Jit64 WriteExceptionExit)
+  EmitDowncountAndBail();
+
   // Use JustWriteExit to emit the linkable exit (handles linkData internally)
   JustWriteExit(destination, false, 0);
   return;
@@ -917,6 +947,9 @@ void JitPPC64::WriteExceptionExitReg(u32 host_reg)
   // Load NPC (may have been modified by CheckExceptionsFromJIT) and dispatch
   m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET + 4));
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
+
+  // Decrement downcount with inline bail (matches Jit64 WriteExceptionExit)
+  EmitDowncountAndBail();
 
   // Record link data — exit address unknown at compile time
   auto* b = js.curBlock;
@@ -987,14 +1020,11 @@ void JitPPC64::WriteIdleExit()
   m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 29);
   m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
 
-  auto* b = js.curBlock;
-  JitBlock::LinkData linkData;
-  linkData.exitAddress = js.compilerPC;
-  linkData.linkStatus = false;
-  linkData.call = false;
-  linkData.exitPtrs = m_asm.Code() + m_asm.Size();
-  m_asm.BRel(m_dispatcher_lite);
-  b->linkData.push_back(linkData);
+  // downcount is 0 here — always exit to Run() (which enters CoreTiming's
+  // idle detection).  Bail directly instead of dispatching: the exit must
+  // NOT be linkable, because a linked jump would bypass the downcount=0
+  // signal and spin forever.
+  m_asm.BRel(m_dispatcher_exit);
 }
 
 // ===========================================================================
@@ -1020,6 +1050,7 @@ void JitPPC64::WriteBLRExit()
               static_cast<s32>(SPR_OFFSET + 4 * 8));  // r0 = SPR_LR
     m_asm.RLWINM(REG_SCRATCH, REG_SCRATCH, 0, 0, 29); // mask to 30 bits
     m_asm.STW(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(PC_OFFSET));
+    EmitDowncountAndBail();
     auto* b = js.curBlock;
     JitBlock::LinkData linkData;
     linkData.exitAddress = js.compilerPC;
