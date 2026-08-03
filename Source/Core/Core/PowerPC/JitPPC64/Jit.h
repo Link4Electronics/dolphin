@@ -68,7 +68,6 @@ extern "C" const u8* JitPPC64Dispatch(u32 pc);
 extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
                                     u32 is_store, u32 access_size,
                                     u32 rd, u32 ra, u64 store_value);
-extern "C" u64 JitPPC64RefreshTimebase(PowerPC::PowerPCState* state);
 
 // psq_l/st C helpers for integer quantize types (U8/U16/S8/S16).
 // Called from JIT-emitted code; takes the MMU pointer for memory access.

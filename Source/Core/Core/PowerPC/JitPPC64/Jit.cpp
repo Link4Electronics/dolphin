@@ -1706,20 +1706,15 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
   if (code_block.m_memory_exception)
     return;
 
-  fprintf(stderr, "JITPROBE: compiling block at 0x%08X (%u instr)\n",
-          em_address, code_block.m_num_instructions);
-
   // Record block start for the store probe (g_probe_block_addr).
   m_block_start = em_address;
 
   // Per-instruction fallback: unhandled opcodes call FallBackToInterpreter
   // (no block-level reject gate).
 
-  fprintf(stderr, "JITPROBE2: m_code_pos=%p m_code_end=%p\n", m_code_pos, m_code_end);
   size_t estimated_size = code_block.m_num_instructions * 128;
   if (m_code_pos + estimated_size > m_code_end)
   {
-    fprintf(stderr, "JITPROBE2: clear_cache path\n");
     if (clear_cache_and_retry_on_failure)
     {
       ClearCache();
@@ -1728,16 +1723,10 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
     return;
   }
 
-  fprintf(stderr, "JITPROBE2: AllocateBlock\n");
   JitBlock* b = m_block_cache.AllocateBlock(em_address);
   if (!b)
-  {
-    fprintf(stderr, "JITPROBE2: AllocateBlock returned NULL\n");
     return;
-  }
-  fprintf(stderr, "JITPROBE2: AllocateBlock OK\n");
 
-  fprintf(stderr, "JITPROBE2: SetBase\n");
   u8* block_start = m_code_pos;
   m_asm.SetBase(m_code_pos, static_cast<size_t>(m_code_end - m_code_pos));
 
@@ -1746,10 +1735,7 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
   b->near_end = block_start;
   js.curBlock = b;
 
-  fprintf(stderr, "JITPROBE2: EmitProlog\n");
   EmitProlog();
-
-  fprintf(stderr, "JITPROBE2: After EmitProlog, code size so far=%zu\n", m_asm.Size());
 
   m_constant_propagation.Clear();
   ResetFPRTypes();
@@ -1761,9 +1747,6 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
     g = false;
 
   js.downcountAmount = 0;
-
-  fprintf(stderr, "JITPROBE2: Starting instruction loop (%u instr)\n",
-          code_block.m_num_instructions);
 
   for (u32 i = 0; i < code_block.m_num_instructions; ++i)
   {
@@ -1800,25 +1783,17 @@ void JitPPC64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
 
     i += js.skipInstructions;
     js.skipInstructions = 0;
-
-    if (i % 10 == 0)
-      fprintf(stderr, "JITPROBE2: compiled instr %u/%u\n", i, code_block.m_num_instructions);
   }
 
-  fprintf(stderr, "JITPROBE2: EmitEpilog\n");
   EmitEpilog(nextPC);
 
-  fprintf(stderr, "JITPROBE2: clear_cache\n");
   u8* block_end = m_code_pos + m_asm.Size();
   __builtin___clear_cache(block_start, block_end);
 
   b->near_end = block_end;
 
-  fprintf(stderr, "JITPROBE2: FinalizeBlock\n");
   m_block_cache.FinalizeBlock(*b, jo.enableBlocklink, code_block, m_code_buffer);
   m_code_pos = block_end;
-
-  fprintf(stderr, "JITPROBE2: block compiled OK\n");
 }
 
 // ===========================================================================
@@ -1889,12 +1864,10 @@ void JitPPC64::Run()
     }
   }
 
-  // Initialize timebase from CoreTiming before entering JIT.  Without this,
-  // CompileMFTB's per-read increments are overwritten every dispatch by
-  // JitPPC64Dispatch's GetFakeTimeBase call.  With GetFakeTimeBase removed
-  // from the dispatch path, we set it here once per slice so the JIT sees
-  // a starting timebase that advances across slices while CompileMFTB's
-  // per-read increments accumulate within each slice.
+  // Initialize the cached spr[TL/TU] from CoreTiming before entering the JIT.
+  // CompileMFTB reads the timebase live from CoreTiming (EmitFakeTimeBase),
+  // so this cache is only a fallback for the interpreter and the debugger;
+  // refreshing it per slice keeps it reasonably current.
   {
     const u64 tb = m_system.GetSystemTimers().GetFakeTimeBase();
     m_ppc_state.spr[SPR_TL] = static_cast<u32>(tb);
@@ -1908,7 +1881,7 @@ void JitPPC64::Run()
   {
     core_timing.Advance();
 
-    // Refresh timebase after CoreTiming advance so JIT sees new base value
+    // Refresh cached spr[TL/TU] after CoreTiming advance (interpreter/debugger fallback)
     {
       const u64 tb = m_system.GetSystemTimers().GetFakeTimeBase();
       m_ppc_state.spr[SPR_TL] = static_cast<u32>(tb);

@@ -243,27 +243,6 @@ extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
 // ===========================================================================
 // JitPPC64Dispatch — asm-friendly block lookup
 //
-// ===========================================================================
-// JitPPC64RefreshTimebase — refresh spr[TL/TU] from CoreTiming
-//
-// Called from within compiled blocks (via CompileMFTB) to ensure the
-// emulated timebase advances even inside backwards-branch loops.
-//
-// Signature (ELFv2 ABI):
-//   r3 = PowerPCState*
-// Returns: u64 timebase value
-// Side effect: writes TL/TU to ppcState->spr[]
-// ===========================================================================
-extern "C" u64 JitPPC64RefreshTimebase(PowerPC::PowerPCState* state)
-{
-  auto& system = Core::System::GetInstance();
-  const u64 tb = system.GetSystemTimers().GetFakeTimeBase();
-  state->spr[SPR_TL] = static_cast<u32>(tb);
-  state->spr[SPR_TU] = static_cast<u32>(tb >> 32);
-  return tb;
-}
-
-// ===========================================================================
 // Called from the generated dispatcher code in CompileDispatcher().
 // Signature (ELFv2 ABI, r3 = first arg):
 //   u32 pc — the current guest PC (from ppcState after last block executed)
@@ -278,9 +257,6 @@ extern "C" const u8* JitPPC64Dispatch(u32 pc)
   if (!jit)
     return nullptr;
 
-  fprintf(stderr, "JITPROBE: dispatch pc=0x%08X\n", pc);
-  fflush(stderr);
-
   JitBlock* block =
       jit->GetBlockCache()->GetBlockFromStartAddress(pc, jit->m_ppc_state.feature_flags);
   if (!block)
@@ -288,23 +264,11 @@ extern "C" const u8* JitPPC64Dispatch(u32 pc)
     // Skip if this PC already failed — avoids log spam from tight retry loops.
     if (jit->m_failed_pcs.count(pc) == 0)
     {
-      fprintf(stderr, "JITPROBE: compiling block at 0x%08X\n", pc);
       jit->Jit(pc);
       block =
           jit->GetBlockCache()->GetBlockFromStartAddress(pc, jit->m_ppc_state.feature_flags);
       if (!block)
-      {
-        fprintf(stderr, "JITPROBE: BLOCK COMPILE FAILED at 0x%08X\n", pc);
         jit->m_failed_pcs.insert(pc);
-      }
-      else
-      {
-        fprintf(stderr, "JITPROBE: block compiled OK at 0x%08X (entry=%p)\n", pc, block->normalEntry);
-      }
-    }
-    else
-    {
-      fprintf(stderr, "JITPROBE: block at 0x%08X already in failed_pcs, skipping\n", pc);
     }
   }
   if (block)
@@ -312,7 +276,6 @@ extern "C" const u8* JitPPC64Dispatch(u32 pc)
     jit->m_ppc_state.downcount -= static_cast<s32>(block->originalSize);
     return block->normalEntry;
   }
-  fprintf(stderr, "JITPROBE: dispatch returning NULL for pc=0x%08X\n", pc);
   return nullptr;
 }
 

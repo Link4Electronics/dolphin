@@ -98,7 +98,10 @@ bool JitPPC64::CompileMTMSR(UGeckoInstruction inst)
 void JitPPC64::EmitFakeTimeBase()
 {
   auto& ctg = m_system.GetCoreTiming().GetGlobals();
-  const s32 TEMP_OFF = 248;
+  // Scratch slot for the downcount↔double conversion.  Must stay out of the
+  // saved FPR area (SP+208..351) and the TLS save (SP+352..359) — see the
+  // frame layout comment in Jit.cpp.  SP+360..383 is free.
+  const s32 TEMP_OFF = 360;
 
   // r11 = &ctg
   TrampMOVI64(m_asm, REG_SCRATCH2, reinterpret_cast<u64>(&ctg));
@@ -148,64 +151,62 @@ void JitPPC64::EmitFakeTimeBase()
 // CompileMFTB — inline GetFakeTimeBase for mftb instruction
 //
 // The TBR field at PPC bits 11-20 uses the same bit layout as the SPR field
-// in mfspr, but the TBR number (284 for TBL, 285 for TBU) equals the
-// write-alias SPR number.  The correct formula to recover the TBR/SPR number
-// from the raw bitfield halves is:
-//     tbr = (SPRL << 5) | SPRU     (NOT (SPRU << 5) | SPRL — the halves are
-//      swapped because BitField<11,5> reads PPC bits 16-20 (lower 5 of the
-//      TBR value), while BitField<16,5> reads PPC bits 11-15 (upper 5).
+// in mfspr: SPRU (bits 11-15) holds the low 5 bits of the SPR index, SPRL
+// (bits 16-20) the high 5 bits.  Recover the SPR number with the same formula
+// used by CompileMFSPR, Jit64, JitArm64, the Interpreter and PPCAnalyst:
+//     tbr = (SPRU << 5) | (SPRL & 0x1F)
 //
-// EmitFakeTimeBase() computes the 64-bit emulated timebase and stores it
-// to spr[SPR_TL] (268) as a 64-bit value (covering both TL and TU slots).
-// The requested half is read from spr[SPR_TL] (low 32) or spr[SPR_TU] (high 32).
+// EmitFakeTimeBase() computes the 64-bit emulated timebase from CoreTiming
+// (no C++ call, no spr round-trip) and leaves it in REG_SCRATCH (r0).  The
+// requested half is extracted from r0: TL = low 32 bits, TU = high 32 bits.
 //
-// When consecutive TBL+TU reads are detected (IPL timing loop pattern),
-// both halves are extracted from REG_SCRATCH with a single FakeTimeBase call,
-// avoiding redundant computation and correctly handling the loop exit.
+// When a back-to-back read of the other half follows (the IPL timing loop does
+// mftbl; mftbu; subf), both halves are extracted from the single r0 value and
+// the second instruction is skipped via js.skipInstructions.
 // ===========================================================================
 
 bool JitPPC64::CompileMFTB(UGeckoInstruction inst)
 {
-  u32 rd = inst.RD;
-  // The TBR field at PPC bits 11-20 uses the same encoding as the SPR field
-  // in mfspr, but the TBR number equals the write-alias SPR number (SPR_TL_W=284,
-  // SPR_TU_W=285).  Compute it from the raw bitfield halves:
-  u32 tbr = (inst.SPRL << 5) | (inst.SPRU & 0x1F);
-  if (tbr != SPR_TL_W && tbr != SPR_TU_W)
+  const u32 tbr = (inst.SPRU << 5) | (inst.SPRL & 0x1F);
+  if (tbr != SPR_TL && tbr != SPR_TU)
     return false;
 
-  // Read from the cached SPR array (updated by JitPPC64Dispatch before each
-  // block dispatch via GetFakeTimeBase).  For TBL reads, also advance TL by 1
-  // tick so that tight waiting loops within a single block see time progress.
-  // Without this, the JIT would compile a single block containing:
-  //   loop: mftb rX; check; bgt loop
-  // and the timebase would never change (SPR never written inside the block),
-  // causing the loop to run forever.
+  const u32 rd = inst.RD;
 
-  if (tbr == SPR_TL_W)
+  // Merge a consecutive read of the timebase halves into one EmitFakeTimeBase
+  // call.  The IPL boot timing loop reads TBL then TBU in adjacent instructions:
+  //     mftbl r5
+  //     mftbu r6
+  //     subf  r7, r5, r6
+  u32 next_tbr = 0;
+  bool merge = false;
+  if (CanMergeNextInstructions(1) && js.op[1].address == js.compilerPC + 4 &&
+      js.op[1].inst.OPCD == 31 && js.op[1].inst.SUBOP10 == 371 && js.op[1].inst.RD != rd)
   {
-    // Load TL, increment, store back. Return the OLD value (before increment).
-    // The old value is correct for callers that read TL then TU and compute
-    // TU - TL — the increment happens between the two reads, so a subsequent
-    // TU read sees the same post-increment TL state, but the arithmetic still
-    // makes progress because TL increases by 1 per loop iteration.
-    m_asm.LWZ(REG_SCRATCH, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_TL));
-    m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH, 1);
-    m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_TL));
-    // If TL wrapped to 0 after increment, increment TU too
-    m_asm.CMPLWI(0, REG_SCRATCH2, 0);
-    m_asm.BC(4, 2, 12);  // BO=4(false), BI=2(EQ): skip 3 instr if TL != 0
-    m_asm.LWZ(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_TU));
-    m_asm.ADDI(REG_SCRATCH2, REG_SCRATCH2, 1);
-    m_asm.STW(REG_SCRATCH2, REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_TU));
-    // Return old TL value
-    m_asm.MR(gpr.W(rd), REG_SCRATCH);
+    next_tbr = (js.op[1].inst.SPRU << 5) | (js.op[1].inst.SPRL & 0x1F);
+    merge = (next_tbr == SPR_TL || next_tbr == SPR_TU);
   }
+
+  // Compute the 64-bit emulated timebase once; result is left in r0.
+  EmitFakeTimeBase();
+
+  // Extract the requested half.  TL = low 32 bits, TU = high 32 bits.
+  if (tbr == SPR_TL)
+    m_asm.CLR32(gpr.W(rd), REG_SCRATCH);
   else
+    m_asm.RLDICL(gpr.W(rd), REG_SCRATCH, 32, 32);
+
+  if (merge)
   {
-    // TUB: just load from cached SPR (no increment — TU advances via TL overflow)
-    m_asm.LWZ(gpr.W(rd), REG_PPC_BASE, static_cast<s32>(SPR_OFFSET + 4 * SPR_TU));
+    js.downcountAmount += js.op[1].opinfo->num_cycles;
+    const u32 next_rd = js.op[1].inst.RD;
+    if (next_tbr == SPR_TL)
+      m_asm.CLR32(gpr.W(next_rd), REG_SCRATCH);
+    else
+      m_asm.RLDICL(gpr.W(next_rd), REG_SCRATCH, 32, 32);
+    js.skipInstructions = 1;
   }
+
   return true;
 }
 

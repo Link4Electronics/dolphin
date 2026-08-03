@@ -22,25 +22,6 @@ static u32 PS_OFFSET_FR(u32 fr, u32 pair)
 template <typename T, typename... Args>
 static T CallLambdaTrampoline(const std::function<T(Args...)>* f, Args... args)
 {
-  // Diagnostic: log the lambda pointer and the address/value arguments for the
-  // suspected crash site (PI_RESET_CODE at 0x0C000000).  Reads get
-  // (Core::System&, u32); writes get (Core::System&, u32, T).
-  if constexpr (sizeof...(Args) >= 2)
-  {
-    auto tuple = std::forward_as_tuple(args...);
-    const u32 address = std::get<1>(tuple);
-    if (address == 0x0C000000)
-    {
-      fprintf(stderr, "JITPROBE: MMIO lambda %p, address=0x%08X",
-              reinterpret_cast<const void*>(f), address);
-      if constexpr (sizeof...(Args) >= 3)
-      {
-        const auto value = std::get<2>(tuple);
-        fprintf(stderr, ", value=%llu", static_cast<unsigned long long>(value));
-      }
-      fprintf(stderr, "\n");
-    }
-  }
   return (*f)(args...);
 }
 
