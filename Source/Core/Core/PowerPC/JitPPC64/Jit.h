@@ -63,6 +63,12 @@ extern volatile u32 g_stm_ea12;        // (EA & 0xFFF) << 12 — page offset in 
 extern volatile u64 g_stm_last_host;   // host address the store was translated to
 extern volatile u32 g_probe_block_addr; // start address of the JIT block doing the store
 
+// CANARY: written by EmitDispatchTargetCanary() right before a dispatcher BCTR.
+// If the BCTR target (r3) is ever outside the JIT code region, this holds the
+// bad target and the generated code traps.  Inspect this in gdb after the
+// SIGTRAP to see what address we were about to branch to.
+extern volatile u64 g_dispatch_bad_target;
+
 // C dispatch function — defined in JitPPC64_BackPatch.cpp
 extern "C" const u8* JitPPC64Dispatch(u32 pc);
 extern "C" u64 TrampolineDispatcher(PowerPC::PowerPCState* state, u32 ea,
@@ -147,6 +153,12 @@ private:
 
   // Compile the dispatcher trampoline
   void CompileDispatcher();
+
+  // CANARY: emit a check that r3 (the BCTR target from JitPPC64Dispatch)
+  // lies within [m_code_region, m_tramp_end).  If not, store the bad target
+  // to a global and trap (SIGTRAP), so a corrupted block entry can never be
+  // branched to as host code.
+  void EmitDispatchTargetCanary();
 
   // Guest instruction dispatching
   void CompileInstruction(PPCAnalyst::CodeOp& op);

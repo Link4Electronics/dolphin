@@ -273,8 +273,27 @@ extern "C" const u8* JitPPC64Dispatch(u32 pc)
   }
   if (block)
   {
+    // CANARY: normalEntry must be inside the JIT code+tramp region.
+    // If it is ever outside, we would branch to a non-code address (e.g. a
+    // guest K2 alias) as host code.  Reject + return nullptr so the
+    // dispatcher takes the interpreter fallback instead of jumping to garbage.
+    const u8* entry = block->normalEntry;
+    if (entry < jit->m_code_region || entry >= jit->m_tramp_end)
+    {
+      fprintf(stderr,
+              "JITCANARY: JitPPC64Dispatch normalEntry=%p OUT OF RANGE for pc=0x%08X "
+              "(code=[%p,%p])\n",
+              reinterpret_cast<const void*>(entry), pc,
+              reinterpret_cast<const void*>(jit->m_code_region),
+              reinterpret_cast<const void*>(jit->m_tramp_end));
+      // Drop the corrupt block so Run() falls through to the interpreter for
+      // this PC (otherwise we re-dispatch the same PC forever via the block cache).
+      jit->GetBlockCache()->EraseSingleBlock(*block);
+      jit->m_failed_pcs.insert(pc);
+      return nullptr;
+    }
     jit->m_ppc_state.downcount -= static_cast<s32>(block->originalSize);
-    return block->normalEntry;
+    return entry;
   }
   return nullptr;
 }

@@ -78,7 +78,11 @@ volatile u32 g_stm_ea12 = 0;          // (EA & 0xFFF) << 12 — page offset in h
 volatile u64 g_stm_last_host = 0;     // host address the store was translated to
 volatile u32 g_probe_block_addr = 0;  // start address of the JIT block doing the store
 
+// CANARY: set by EmitDispatchTargetCanary() right before a dispatcher BCTR.
+volatile u64 g_dispatch_bad_target = 0;
+
 static struct sigaction s_old_sigsegv;
+static struct sigaction s_old_sigtrap;
 
 // code_region address for signal handler debug output
 static const u8* s_code_region = nullptr;
@@ -232,11 +236,18 @@ static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
 
   uintptr_t access_addr = reinterpret_cast<uintptr_t>(info->si_addr);
 
-  if (g_jit_ppc64_instance && g_jit_ppc64_instance->HandleFault(access_addr, ctx))
+  // SIGTRAP is used by the EmitDispatchTargetCanary trap — not a memory
+  // fault, so skip HandleFault and go straight to diagnostics.
+  const bool is_trap_canary = (sig == SIGTRAP);
+  if (!is_trap_canary && g_jit_ppc64_instance && g_jit_ppc64_instance->HandleFault(access_addr, ctx))
     goto done;
 
   if (g_jit_ppc64_instance)
   {
+    if (is_trap_canary)
+      fprintf(stderr, "JITCANARY: dispatch target out of code region! "
+                      "g_dispatch_bad_target=0x%08llX\n",
+              static_cast<unsigned long long>(g_dispatch_bad_target));
     if (ctx->CTX_NIP)
       g_jit_ppc64_instance->DumpCode(reinterpret_cast<const u8*>(ctx->CTX_NIP) - 16, 48);
     fprintf(stderr, "JIT: g_last_block_entry = %p (intended jump target)\n",
@@ -249,6 +260,25 @@ static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
             "JIT: last store probe: EA=0x%08llX ea12=0x%08X host=0x%08llX block=0x%08X\n",
             static_cast<unsigned long long>(g_stm_last_ea), g_stm_ea12,
             static_cast<unsigned long long>(g_stm_last_host), g_probe_block_addr);
+
+    // CANARY classification: is the faulting NIP inside the JIT code region?
+    // If NIP is a low guest address (e.g. 0xC21EDBA0 = K2 alias) we branched
+    // to guest code as host code.  If NIP is inside [code_region, tramp_end)
+    // this is a data fault (fastmem miss) at a valid host instruction.
+    const u8* cr = s_code_region;
+    const u8* te = cr ? cr + JIT_CODE_SIZE + TRAMP_CODE_SIZE : nullptr;
+    const bool nip_in_code = cr && ctx->CTX_NIP >= reinterpret_cast<u64>(cr) &&
+                             ctx->CTX_NIP < reinterpret_cast<u64>(te);
+    const bool entry_in_code = cr && g_last_block_entry >= cr && g_last_block_entry < te;
+    fprintf(stderr, "JIT: code region=[%p,%p)  NIP%s-code  last_entry%s-code\n", cr, te,
+            nip_in_code ? " IN" : " OUTSIDE",
+            entry_in_code ? " IN" : " OUTSIDE");
+    const u8* mem_ptr = g_jit_ppc64_instance->m_ppc_state.mem_ptr;
+    const bool addr_in_fastmem = mem_ptr && access_addr >= reinterpret_cast<u64>(mem_ptr) &&
+                                 access_addr < reinterpret_cast<u64>(mem_ptr) + 0x20000000ULL;
+    fprintf(stderr, "JIT: mem_ptr=%p  addr%s-fastmem-phys-view\n", mem_ptr,
+            addr_in_fastmem ? " IN" : " OUTSIDE");
+
     g_jit_ppc64_instance->DoBacktrace();
   }
 
@@ -256,9 +286,9 @@ static void SIGSEGVHandler(int sig, siginfo_t* info, void* ucontext_arg)
   {
     struct sigaction sa_default = {};
     sa_default.sa_handler = SIG_DFL;
-    sigaction(SIGSEGV, &sa_default, nullptr);
+    sigaction(sig, &sa_default, nullptr);
   }
-  raise(SIGSEGV);
+  raise(sig);
 
 done:
   // Restore mem_ptr to the ucontext so the kernel's sigreturn sets
@@ -330,19 +360,22 @@ void JitPPC64::Init()
                  fmt::ptr(&m_ppc_state),
                  fmt::ptr(m_code_region), fmt::ptr(m_tramp_region), COMBINED_SIZE);
 
-  // Install SIGSEGV handler for MMIO backpatching
+  // Install SIGSEGV handler for MMIO backpatching (also catches the
+  // EmitDispatchTargetCanary SIGTRAP so it prints diagnostics).
   g_jit_ppc64_instance = this;
   struct sigaction sa = {};
   sa.sa_sigaction = SIGSEGVHandler;
   sa.sa_flags = SA_SIGINFO;
   sigemptyset(&sa.sa_mask);
   sigaction(SIGSEGV, &sa, &s_old_sigsegv);
+  sigaction(SIGTRAP, &sa, &s_old_sigtrap);
 }
 
 void JitPPC64::Shutdown()
 {
-  // Restore old SIGSEGV handler
+  // Restore old SIGSEGV/SIGTRAP handlers
   sigaction(SIGSEGV, &s_old_sigsegv, nullptr);
+  sigaction(SIGTRAP, &s_old_sigtrap, nullptr);
   g_jit_ppc64_instance = nullptr;
 
   ShutdownBackpatch();
@@ -455,6 +488,7 @@ void JitPPC64::CompileDispatcher()
   // PROBE: save intended block entry to global before jumping
   TrampMOVI64(m_asm, REG_SCRATCH2, reinterpret_cast<u64>(&g_last_block_entry));
   m_asm.STD(3, REG_SCRATCH2, 0);
+  EmitDispatchTargetCanary();    // CANARY: trap if r3 is outside the code region
   m_asm.MTCTR(3);                // block → CTR
   m_asm.BCTR();                  // jump to block (LR = BCTR return address)
 
@@ -518,6 +552,7 @@ void JitPPC64::CompileDispatcher()
   // PROBE: save intended block entry to global before jumping
   TrampMOVI64(m_asm, REG_SCRATCH2, reinterpret_cast<u64>(&g_last_block_entry));
   m_asm.STD(3, REG_SCRATCH2, 0);
+  EmitDispatchTargetCanary();    // CANARY: trap if r3 is outside the code region
   m_asm.MTCTR(3);
   m_asm.BCTR();
 
@@ -584,6 +619,43 @@ void JitPPC64::CompileDispatcher()
   m_branch_counters_base = m_code_pos;
   m_branch_counters.clear();
   m_branch_counters_used = 0;
+}
+
+// ===========================================================================
+// EmitDispatchTargetCanary — verify a dispatcher BCTR target is JIT code
+//
+// Called from CompileDispatcher() right before each MTCTR(3)/BCTR that jumps
+// to block->normalEntry (the value JitPPC64Dispatch returns in r3).  Emits:
+//
+//   STD  r3, &g_dispatch_bad_target        ; record target for post-mortem
+//   ... r3 >= m_code_region ? no-trap ...  ; unsigned compare, skip if GE
+//   ... r3 <  m_tramp_end   ? no-trap ...  ; unsigned compare, skip if LT
+//   TRAP                                     ; SIGTRAP — bad target
+//
+// If r3 is outside [m_code_region, m_tramp_end) we trap instead of branching,
+// so a corrupted block entry can never be executed as host code.  r3 is
+// preserved (only r0/r11 are clobbered).
+// ===========================================================================
+void JitPPC64::EmitDispatchTargetCanary()
+{
+  // Record the intended target so gdb can inspect it after the SIGTRAP.
+  TrampMOVI64(m_asm, REG_SCRATCH2, reinterpret_cast<u64>(&g_dispatch_bad_target));
+  m_asm.STD(3, REG_SCRATCH2, 0);
+
+  // Lower bound: skip the TRAP if r3 >= m_code_region (unsigned).
+  // CR0 after CMPLD: LT = r3 < bound, GT = r3 > bound, EQ = r3 == bound.
+  // BC(4, 0, 8) = branch-if-FALSE on LT bit = branch if NOT LT = r3 >= bound.
+  TrampMOVI64(m_asm, REG_SCRATCH, reinterpret_cast<u64>(m_code_region));
+  m_asm.CMPLD(0, 3, REG_SCRATCH);
+  m_asm.BC(4, 0, 8);   // skip TRAP if r3 >= code_region
+  m_asm.TRAP();
+
+  // Upper bound: skip the TRAP if r3 < m_tramp_end (unsigned).
+  // BC(12, 0, 8) = branch-if-TRUE on LT bit = branch if r3 < bound.
+  TrampMOVI64(m_asm, REG_SCRATCH, reinterpret_cast<u64>(m_tramp_end));
+  m_asm.CMPLD(0, 3, REG_SCRATCH);
+  m_asm.BC(12, 0, 8);  // skip TRAP if r3 < tramp_end
+  m_asm.TRAP();
 }
 
 // ===========================================================================
